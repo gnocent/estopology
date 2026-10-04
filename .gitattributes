@@ -1,0 +1,13 @@
+# Fins de ligne LF partout, quel que soit le système du poste de travail
+# (les scripts shell doivent rester exécutables sous Linux).
+* text=auto eol=lf
+
+# Fichiers binaires : jamais de conversion.
+*.png binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.zst binary
+*.db binary
+*.xlsx binary
+*.gif binary

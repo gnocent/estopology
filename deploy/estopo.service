@@ -1,0 +1,36 @@
+# Example systemd unit for estopo. Not installed automatically; the steps
+# are explained in docs/installation.md. As root, from the directory that
+# holds the downloaded binary and these two files:
+#
+#   useradd --system --home-dir /var/lib/estopo --shell /sbin/nologin estopo
+#   install -d -m 0755 /opt/estopo
+#   install -m 0755 estopo-linux-amd64 /opt/estopo/estopo
+#   install -d -o estopo -g estopo -m 0750 /var/lib/estopo
+#   install -d -o root -g estopo -m 0750 /etc/estopo /etc/estopo/secrets /etc/estopo/tls
+#   install -o root -g estopo -m 0640 estopo.env.example /etc/estopo/estopo.env
+#   install -m 0644 estopo.service /etc/systemd/system/estopo.service
+#   systemctl daemon-reload && systemctl enable --now estopo
+#
+# Edit /etc/estopo/estopo.env before the first start.
+[Unit]
+Description=ES.Topo - Elasticsearch topology history
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=estopo
+Group=estopo
+EnvironmentFile=/etc/estopo/estopo.env
+ExecStart=/opt/estopo/estopo serve
+Restart=on-failure
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# The only place estopo writes to. Everything else (/etc/estopo included) is
+# read-only for the service; files under /home and /root are not visible.
+ReadWritePaths=/var/lib/estopo
+
+[Install]
+WantedBy=multi-user.target

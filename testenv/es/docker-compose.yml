@@ -1,0 +1,75 @@
+# Small secured Elasticsearch cluster used to capture real API responses
+# (plan step 2). Topology: 2 "datacenters", hot/warm/cold tiers, two nodes
+# (es03, es04) on the same "machine" m3.
+# Variables: ES_VERSION (image tag), PKI_DIR (output of pki.sh), ES_PORT.
+x-common-env: &common-env
+  cluster.name: estopo-fx
+  discovery.seed_hosts: es01,es02,es03
+  cluster.initial_master_nodes: es01,es02,es03
+  node.store.allow_mmap: "false"
+  ES_JAVA_OPTS: -Xms384m -Xmx384m
+  ELASTIC_PASSWORD: estopo-test
+  xpack.license.self_generated.type: trial
+  xpack.ml.enabled: "false"
+  ingest.geoip.downloader.enabled: "false"
+  xpack.security.enabled: "true"
+  xpack.security.http.ssl.enabled: "true"
+  xpack.security.http.ssl.key: certs/node.key
+  xpack.security.http.ssl.certificate: certs/node.crt
+  xpack.security.http.ssl.certificate_authorities: certs/ca-chain.crt
+  xpack.security.http.ssl.client_authentication: optional
+  xpack.security.transport.ssl.enabled: "true"
+  xpack.security.transport.ssl.key: certs/node.key
+  xpack.security.transport.ssl.certificate: certs/node.crt
+  xpack.security.transport.ssl.certificate_authorities: certs/ca-chain.crt
+  xpack.security.transport.ssl.verification_mode: certificate
+  xpack.security.authc.realms.pki.pki1.order: "0"
+  xpack.security.authc.realms.pki.pki1.certificate_authorities: certs/ca-chain.crt
+  xpack.security.authc.realms.file.file1.order: "1"
+  xpack.security.authc.realms.native.native1.order: "2"
+
+x-node: &node
+  image: docker.elastic.co/elasticsearch/elasticsearch:${ES_VERSION}
+  volumes:
+    - ${PKI_DIR}:/usr/share/elasticsearch/config/certs:ro
+  ulimits:
+    nofile: { soft: 65536, hard: 65536 }
+
+services:
+  es01:
+    <<: *node
+    hostname: es01
+    ports: ["127.0.0.1:${ES_PORT:-19200}:9200"]
+    environment:
+      <<: *common-env
+      node.name: es01
+      node.roles: master,data_hot,data_content,ingest,remote_cluster_client
+      node.attr.dc: dc1
+      node.attr.machine: m1
+  es02:
+    <<: *node
+    hostname: es02
+    environment:
+      <<: *common-env
+      node.name: es02
+      node.roles: master,data_hot,data_content,ingest,remote_cluster_client
+      node.attr.dc: dc2
+      node.attr.machine: m2
+  es03:
+    <<: *node
+    hostname: es03
+    environment:
+      <<: *common-env
+      node.name: es03
+      node.roles: master,data_warm
+      node.attr.dc: dc1
+      node.attr.machine: m3
+  es04:
+    <<: *node
+    hostname: es04
+    environment:
+      <<: *common-env
+      node.name: es04
+      node.roles: data_cold
+      node.attr.dc: dc1
+      node.attr.machine: m3

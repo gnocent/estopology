@@ -1,0 +1,20 @@
+{
+  "name": "demo",
+  "description": "Incidents of an ordinary fortnight on clusters b, c and small (and a, when present), counted back from the end so that they stay recent: crashes, a machine and a data centre lost, maintenance, a rolling upgrade, a rebuilt node, a wrong index setting, an API failure, a voluntary deletion, and two incidents still in progress at the end.",
+  "steps": [
+    {"at": "-12d03:10", "cluster": "c", "do": "node-leave", "node": "cold-dc2-m01-3", "for": "35m"},
+    {"at": "-10d14:05", "cluster": "b", "do": "node-leave", "node": "hot-dc1-m02-2", "for": "25m"},
+    {"at": "-9d02:30", "cluster": "b", "do": "machine-leave", "machine": "warm-dc2-m02", "for": "3h"},
+    {"at": "-8d10:00", "cluster": "*", "do": "cluster-setting", "key": "cluster.routing.allocation.enable", "value": "primaries", "for": "40m"},
+    {"at": "-7d09:00", "cluster": "b", "do": "rolling-upgrade", "version": "9.5.4", "every": "12m", "down": "4m"},
+    {"at": "-6d16:20", "cluster": "small", "do": "node-replace", "node": "hot-dc2-m01-1"},
+    {"at": "-6d", "cluster": "a", "do": "remote", "remote": "clu-b", "for": "2h"},
+    {"at": "-5d11:00", "cluster": "c", "do": "index-setting", "index": "arch-003", "key": "index.routing.allocation.require.dc", "value": "dc9", "for": "6h"},
+    {"at": "-4d21:00", "cluster": "c", "do": "fault", "path": "/_cat/shards", "status": 503, "for": "30m"},
+    {"at": "-3d12:00", "cluster": "small", "do": "delete-index", "index": "logs-001"},
+    {"at": "-2d09:15", "cluster": "b", "do": "dc-leave", "dc": "dc2", "for": "50m"},
+    {"at": "-1d18:40", "cluster": "c", "do": "node-replace", "node": "hot-dc1-m01-1"},
+    {"at": "-3h", "cluster": "small", "do": "node-leave", "node": "warm-dc1-m01-1"},
+    {"at": "-40m", "cluster": "b", "do": "machine-leave", "machine": "hot-dc1-m03"}
+  ]
+}

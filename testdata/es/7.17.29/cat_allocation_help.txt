@@ -1,0 +1,9 @@
+shards       | s              | number of shards on node      
+disk.indices | di,diskIndices | disk used by ES indices       
+disk.used    | du,diskUsed    | disk used (total, not just ES)
+disk.avail   | da,diskAvail   | disk available                
+disk.total   | dt,diskTotal   | total capacity of all volumes 
+disk.percent | dp,diskPercent | percent disk used             
+host         | h              | host of node                  
+ip           |                | ip of node                    
+node         | n              | name of node                  

@@ -1,0 +1,3 @@
+version: 7.17.29
+image: docker.elastic.co/elasticsearch/elasticsearch@sha256:3f55a7f6f29b95345dc33808d6e914f81d125d4ca90a414e26c81a3521400980
+captured: 2026-09-30T18:51:06Z

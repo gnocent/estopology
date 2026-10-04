@@ -1,0 +1,3 @@
+version: 8.19.22
+image: docker.elastic.co/elasticsearch/elasticsearch@sha256:e98f9c3b09beb2fbb9eaf667d602df3f0e00bd3644138b8458dc17ba1a675595
+captured: 2026-09-30T18:54:13Z

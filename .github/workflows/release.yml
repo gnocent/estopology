@@ -1,0 +1,45 @@
+name: Release
+
+# On a tag vX.Y[.Z][-suffix]: run the same verification as locally
+# (scripts/check.sh: gofmt, vet, tests, static cross-builds), build the
+# binaries for Linux, Windows and macOS (Apple Silicon) and attach them to
+# the GitHub release. The web UI is not rebuilt here: web/dist is committed
+# and embedded in the binaries.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0 # git describe needs the tags
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check
+        run: ./scripts/check.sh
+
+      - name: Build the binaries
+        run: VERSION="${GITHUB_REF_NAME#v}" ./build-release.sh
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # A tag with a suffix (v0.8.0-beta, v1.0.0-rc1) is published as a pre-release.
+        # Notes: docs/releases/<tag>.md when it exists, generated otherwise.
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          notes="--generate-notes"
+          if [ -f "docs/releases/$GITHUB_REF_NAME.md" ]; then notes="--notes-file docs/releases/$GITHUB_REF_NAME.md"; fi
+          gh release create "$GITHUB_REF_NAME" dist/release/* \
+            --title "ES.Topo $GITHUB_REF_NAME" $notes $prerelease

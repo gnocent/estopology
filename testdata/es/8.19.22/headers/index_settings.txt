@@ -1,0 +1,6 @@
+HTTP/1.1 200 OK
+X-elastic-product: Elasticsearch
+Warning: 299 Elasticsearch-8.19.22-3b2a41103de35e0af4064d647974032fcc1bcde9 "this request accesses system indices: [.security-7], but in a future major version, direct access to system indices will be prevented by default"
+content-type: application/json
+Transfer-Encoding: chunked
+

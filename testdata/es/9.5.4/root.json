@@ -1,0 +1,17 @@
+{
+  "name" : "es01",
+  "cluster_name" : "estopo-fx",
+  "cluster_uuid" : "NCg2-6TeRx-ZMy7Jz5KafA",
+  "version" : {
+    "number" : "9.5.4",
+    "build_flavor" : "default",
+    "build_type" : "docker",
+    "build_hash" : "9170df19cae1adb107b7b489b4d82dec66d7a337",
+    "build_date" : "2026-09-09T22:42:53.976833287Z",
+    "build_snapshot" : false,
+    "lucene_version" : "10.5.1",
+    "minimum_wire_compatibility_version" : "8.19.0",
+    "minimum_index_compatibility_version" : "8.0.0"
+  },
+  "tagline" : "You Know, for Search"
+}

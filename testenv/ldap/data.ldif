@@ -1,0 +1,72 @@
+dn: dc=example,dc=org
+objectClass: dcObject
+objectClass: organization
+dc: example
+o: Example
+
+dn: ou=services,dc=example,dc=org
+objectClass: organizationalUnit
+ou: services
+
+dn: ou=people,dc=example,dc=org
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groups,dc=example,dc=org
+objectClass: organizationalUnit
+ou: groups
+
+dn: cn=estopo,ou=services,dc=example,dc=org
+objectClass: organizationalRole
+objectClass: simpleSecurityObject
+cn: estopo
+userPassword: @service-secret@
+
+dn: uid=alice,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: alice
+cn: Alice
+sn: Admin
+userPassword: @alice-password@
+
+dn: uid=bob,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: bob
+cn: Bob
+sn: Reader
+userPassword: @bob-password@
+
+dn: uid=carol,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: carol
+cn: Carol
+sn: Nobody
+userPassword: @carol-password@
+
+dn: uid=dave,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: dave
+cn: Dave
+sn: Posix
+userPassword: @dave-password@
+
+dn: cn=estopo-admins,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: estopo-admins
+member: uid=alice,ou=people,dc=example,dc=org
+
+dn: cn=estopo-readers,ou=groups,dc=example,dc=org
+objectClass: groupOfUniqueNames
+cn: estopo-readers
+uniqueMember: UID=bob, ou=People, dc=example, dc=org
+
+dn: cn=ops,ou=groups,dc=example,dc=org
+objectClass: posixGroup
+cn: ops
+gidNumber: 5000
+memberUid: dave
+
+dn: cn=others,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: others
+member: uid=carol,ou=people,dc=example,dc=org

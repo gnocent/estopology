@@ -1,0 +1,41 @@
+# Configuration locale d'outils de développement : jamais versionnée.
+.claude/
+
+# Notes de travail et rapports de mesure internes : hors du dépôt public.
+/plans/
+/docs/bench/
+
+# Dossier de données par défaut (ESTOPO_DATA_DIR=./data) : bases SQLite,
+# spool de records, certificats générés. Données locales, jamais versionnées.
+/data/
+
+# Binaires compilés, quel que soit le nom de sortie ou la plateforme.
+/estopo
+/estopo.exe
+/essim
+/essim.exe
+/dist/
+
+# Dépendances et caches du front (web/dist/ compilé, lui, EST versionné).
+web/node_modules/
+web/.vite/
+
+# Résultats des tests UI Playwright.
+web/test-results/
+web/playwright-report/
+
+# PKI de test et réponses générées à la volée par les scripts de dev
+# (les fixtures de référence sont sous testdata/ et versionnées).
+/tmp/
+
+# Artefacts Go standards.
+*.test
+*.out
+*.prof
+
+# Fichiers spécifiques à l'éditeur / l'OS.
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
