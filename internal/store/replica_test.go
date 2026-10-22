@@ -175,3 +175,98 @@ func TestPartitionCopy(t *testing.T) {
 		t.Errorf("ingest after install: %+v %v", res, err)
 	}
 }
+
+// The standby ends its sessions like the primary: those of the accounts
+// whose password, role or source changed, or that were disabled or deleted
+// (an LDAP account created here too, when the replicated audit shows its
+// deletion), and all of them when the authentication mode changes.
+func TestMetaReplicationEndsSessions(t *testing.T) {
+	ctx := context.Background()
+	clk := clock.NewManual(t0)
+	primary, err := Open(ctx, t.TempDir(), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer primary.Close()
+	standby, err := Open(ctx, t.TempDir(), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer standby.Close()
+	sync := func() {
+		t.Helper()
+		snap, err := primary.ExportMeta(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(snap)
+		got, err := DecodeMetaSnapshot(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := standby.ImportMeta(ctx, got); err != nil {
+			t.Fatal(err)
+		}
+	}
+	primary.SetSetting(ctx, "auth", map[string]any{"mode": "ldap", "session_hours": 12})
+	for _, u := range []User{
+		{Name: "admin", Role: "admin", Source: "local", Password: "$argon2id$1"},
+		{Name: "bob", Role: "reader", Source: "local", Password: "$argon2id$b"},
+		{Name: "carol", Role: "reader", Source: "local", Password: "$argon2id$c"},
+		{Name: "dan", Role: "admin", Source: "local", Password: "$argon2id$d"},
+		{Name: "eve", Role: "reader", Source: "local", Password: "$argon2id$e"},
+	} {
+		primary.SaveUser(ctx, u)
+	}
+	sync()
+	standby.SaveUser(ctx, User{Name: "ldap-dave", Role: "admin", Source: "ldap"})
+	standby.SaveUser(ctx, User{Name: "ldap-erin", Role: "reader", Source: "ldap"})
+	open := func(names ...string) {
+		for _, n := range names {
+			if err := standby.CreateSession(ctx, Session{TokenHash: "s-" + n, User: n, CSRF: "x", CreatedMs: 1, ExpiresMs: t0.Add(time.Hour).UnixMilli()}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	alive := func(n string) bool {
+		_, err := standby.SessionByHash(ctx, "s-"+n)
+		return err == nil
+	}
+	open("admin", "bob", "carol", "dan", "eve", "ldap-dave", "ldap-erin")
+
+	clk.Advance(time.Minute)
+	primary.SetPassword(ctx, "admin", "$argon2id$2")
+	primary.DeleteUser(ctx, "carol")
+	primary.SaveUser(ctx, User{Name: "dan", Role: "reader", Source: "local"})
+	primary.SaveUser(ctx, User{Name: "eve", Role: "reader", Source: "local", Disabled: true})
+	primary.Audit(ctx, "admin", "user.delete", "ldap-dave", "")
+	primary.SetSetting(ctx, "auth", map[string]any{"mode": "ldap", "session_hours": 24})
+	sync()
+	for n, want := range map[string]bool{"admin": false, "bob": true, "carol": false, "dan": false, "eve": false, "ldap-dave": false, "ldap-erin": true} {
+		if alive(n) != want {
+			t.Errorf("session of %s alive %v, want %v", n, !want, want)
+		}
+	}
+	if _, err := standby.User(ctx, "ldap-dave"); err == nil {
+		t.Error("LDAP account deleted on the primary kept on the standby")
+	}
+	if _, err := standby.User(ctx, "ldap-erin"); err != nil {
+		t.Errorf("LDAP account of the standby dropped: %v", err)
+	}
+	// Logging in again after the deletion recreates the account for good.
+	clk.Advance(time.Minute)
+	standby.SaveUser(ctx, User{Name: "ldap-dave", Role: "admin", Source: "ldap"})
+	open("ldap-dave")
+	sync()
+	if !alive("ldap-dave") {
+		t.Error("LDAP account recreated after its deletion dropped again")
+	}
+
+	primary.SetSetting(ctx, "auth", map[string]any{"mode": "local"})
+	sync()
+	for _, n := range []string{"bob", "ldap-erin", "ldap-dave"} {
+		if alive(n) {
+			t.Errorf("session of %s survives a change of mode", n)
+		}
+	}
+}

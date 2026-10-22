@@ -89,7 +89,7 @@ As long as authentication is enabled, ES.Topo refuses to delete, disable or demo
 - **Inactivity**: "Idle session expiry (hours)", 12 by default, from 1 to 720. The expiry is pushed back as the session is used, but only when less than half of the delay is left: in practice, an idle session expires between half the delay and the whole delay.
 - **Maximum lifetime**: a session expires at the latest **7 days** after sign-in, even if it is used continuously. This duration cannot be set.
 - "Sign out" closes the session.
-- The sessions of a directory account end when the "LDAP" mode is left.
+- Changing the authentication mode closes every open session, except the one of the local administrator making the change (when the new mode is not "None").
 - The chosen language and theme are saved with the account and follow it from one browser to another.
 
 ## Sign-in throttling
@@ -130,8 +130,9 @@ Choose the "LDAP" mode: the "LDAP directory" card appears.
 | "Service account password file" | Path of the file holding this password. It is read again at each connection: no restart after a rotation. | required |
 | "User search base" | Branch in which to search for people (whole subtree). | required |
 | "User filter ({user} = login name)" | Search filter; `{user}` is replaced with the typed name, protected against injection. | `(&(objectClass=inetOrgPerson)(uid={user}))` |
+| "Account name attribute (read from the entry found)" | Attribute of the entry found that names the account in ES.Topo; it must have a single value. With a filter accepting the identifier or the address, `(\|(uid={user})(mail={user}))`, signing in with either opens the same account. For Active Directory: `sAMAccountName`. | `uid` |
 | "Group search base" | Branch in which to search for groups. | required |
-| "Group filter ({dn} = user DN, {user} = login name)" | Filter that finds the groups of a person. | `groupOfNames` groups (`member` attribute), `groupOfUniqueNames` (`uniqueMember`) and `posixGroup` (`memberUid`) |
+| "Group filter ({dn} = user DN, {user} = account name)" | Filter that finds the groups of a person. | `groupOfNames` groups (`member` attribute), `groupOfUniqueNames` (`uniqueMember`) and `posixGroup` (`memberUid`) |
 | "Administrator groups (DN, one per line)" | Belonging to one of them gives the admin role. | at least one group, admin or reader |
 | "Reader groups (DN, one per line)" | Belonging to one of them gives the reader role. | |
 
@@ -171,6 +172,7 @@ dc=example,dc=org
    | Service account password file | `/etc/estopo/secrets/ldap-bind-password` |
    | User search base | `ou=people,dc=example,dc=org` |
    | User filter | *(empty: default filter)* |
+   | Account name attribute | *(empty: `uid`)* |
    | Group search base | `ou=groups,dc=example,dc=org` |
    | Group filter | *(empty: default filter)* |
    | Administrator groups | `cn=estopo-admins,ou=groups,dc=example,dc=org` |

@@ -2,6 +2,7 @@ package ha
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -505,5 +506,204 @@ func TestStateWrittenBeforeApplied(t *testing.T) {
 	}
 	if err := primary.m.Demote(cancelled, "admin", "https://peer.example.org"); err == nil || primary.m.Role() != RolePrimary {
 		t.Errorf("role after a failed demotion: %s, %v", primary.m.Role(), err)
+	}
+}
+
+// A demotion asks for the history to be copied again from the new primary.
+// An instance that restarts before its first synchronisation still does it,
+// instead of appending the primary's records to its own (the readings of
+// the split brain would stay, those of the primary would be missing). The
+// same holds for a rebuild asked for by an administrator.
+func TestRebuildRequestSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	primary, standby, srv, c := pair(t)
+	// Split brain: the standby is promoted and collects on its own, while
+	// the primary goes on collecting.
+	if err := standby.m.Promote(ctx, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	standby.capture(c, "small", 6*24*time.Hour)
+	primary.capture(c, "small", 6*24*time.Hour+time.Hour)
+	if err := standby.m.Demote(ctx, "admin", srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	standby.start(srv.URL) // restart before the first synchronisation
+	if err := standby.m.SyncOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if standby.captures("small") != primary.captures("small") || standby.lastTs("small") != primary.lastTs("small") {
+		t.Fatalf("after the demotion and a restart: %d captures (primary %d), last %d (primary %d)",
+			standby.captures("small"), primary.captures("small"), standby.lastTs("small"), primary.lastTs("small"))
+	}
+	// Done: the next start does not copy again.
+	standby.start(srv.URL)
+	if standby.m.rebuild {
+		t.Error("rebuild still pending after a successful synchronisation")
+	}
+
+	if err := standby.m.Rebuild(ctx, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	standby.start(srv.URL)
+	if !standby.m.rebuild {
+		t.Error("the rebuild asked for was lost by a restart")
+	}
+}
+
+// A primary whose spool holds nothing more for a cluster (pruned, or the
+// cluster stopped being collected while the standby was down) still
+// announces how far its history goes: a standby behind it rebuilds the
+// cluster instead of staying behind without an error nor a lag.
+func TestStandbyCatchesUpWithoutSpool(t *testing.T) {
+	ctx := context.Background()
+	primary, standby, _, c := pair(t)
+	primary.capture(c, "small", 5*24*time.Hour+time.Hour)
+	primary.capture(c, "small", 5*24*time.Hour+2*time.Hour)
+	if err := os.RemoveAll(filepath.Join(primary.sp.Dir(), "small")); err != nil {
+		t.Fatal(err)
+	}
+	if err := standby.m.SyncOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rs := standby.m.Status().Replication
+	if standby.lastTs("small") != primary.lastTs("small") || standby.captures("small") != primary.captures("small") {
+		t.Fatalf("standby behind the primary: last %d (primary %d), %d captures (primary %d), status %+v",
+			standby.lastTs("small"), primary.lastTs("small"), standby.captures("small"), primary.captures("small"), rs)
+	}
+	if len(rs.Clusters) != 1 || rs.Clusters[0].PrimaryMs != primary.lastTs("small") || rs.LagMs != 0 {
+		t.Errorf("replication status: %+v", rs)
+	}
+}
+
+// A blocked replication stays blocked while the primary does not answer:
+// only a primary that passes the check lifts the block.
+func TestBlockedSurvivesUnreachablePrimary(t *testing.T) {
+	ctx := context.Background()
+	_, standby, srv, _ := pair(t)
+	emptied := newNode(t, "")
+	srv.serve(emptied.m.Handler())
+	if err := standby.m.SyncOnce(ctx); err == nil || standby.m.Status().Replication.Blocked == "" {
+		t.Fatalf("emptied primary: %v, %+v", err, standby.m.Status().Replication)
+	}
+	srv.serve(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "maintenance", http.StatusServiceUnavailable)
+	}))
+	err := standby.m.SyncOnce(ctx)
+	if rs := standby.m.Status().Replication; err == nil || rs.Blocked == "" || !strings.Contains(rs.LastError, "503") {
+		t.Fatalf("unreachable primary: %v, %+v", err, rs)
+	}
+	srv.serve(emptied.m.Handler())
+	if err := standby.m.Rebuild(ctx, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := standby.m.SyncOnce(ctx); err != nil || standby.m.Status().Replication.Blocked != "" {
+		t.Errorf("after the rebuild: %v, %+v", err, standby.m.Status().Replication)
+	}
+}
+
+// listClusters calls the clusters endpoint of n within a second.
+func (n *node) listClusters() (int, []remoteCluster) {
+	n.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	req := httptest.NewRequest("GET", "/api/v1/replication/clusters", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	rec := httptest.NewRecorder()
+	n.m.Handler().ServeHTTP(rec, req)
+	var out []remoteCluster
+	if rec.Code == http.StatusOK {
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			n.t.Fatal(err)
+		}
+	}
+	return rec.Code, out
+}
+
+// The clusters endpoint does not go through the ingestion: an ingestion in
+// progress (here, one that never ends) does not hold the answer back.
+func TestClustersListDoesNotWaitForIngestion(t *testing.T) {
+	n := newNode(t, "")
+	n.configure("small")
+	c := sim.Build(sim.PresetSmall("8.19.22"), t0)
+	n.capture(c, "small", 0)
+	n.capture(c, "small", time.Hour)
+	n.m.o.Hooks.LastTs = func(ctx context.Context, _ string) (int64, error) {
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	code, cs := n.listClusters()
+	if code != http.StatusOK || len(cs) != 1 || cs[0].LastMs != t0.Add(time.Hour).UnixMilli() {
+		t.Fatalf("clusters: %d %+v", code, cs)
+	}
+}
+
+// A cluster whose last partition cannot be read does not stop the
+// replication of the others: it is still listed (not taken for purged),
+// without its last ingested date.
+func TestClustersListSurvivesUnreadablePartition(t *testing.T) {
+	ctx := context.Background()
+	n := newNode(t, "")
+	n.configure("small", "broken")
+	c := sim.Build(sim.PresetSmall("8.19.22"), t0)
+	n.capture(c, "small", 0)
+	w := store.WeekOf(t0.UnixMilli())
+	rel := filepath.Join("clusters", "broken", w.Key+".db")
+	os.MkdirAll(filepath.Join(n.dir, "clusters", "broken"), 0o750)
+	if err := os.WriteFile(filepath.Join(n.dir, rel), []byte(strings.Repeat("not a database ", 512)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.st.Meta.ExecContext(ctx, `INSERT INTO partition(cluster_id, week, from_ms, to_ms, path, created_ms)
+		VALUES ('broken', ?, ?, ?, ?, 0)`, w.Key, w.FromMs, w.ToMs, filepath.ToSlash(rel)); err != nil {
+		t.Fatal(err)
+	}
+	code, cs := n.listClusters()
+	if code != http.StatusOK || len(cs) != 2 {
+		t.Fatalf("clusters: %d %+v", code, cs)
+	}
+	if cs[0].Cluster != "broken" || cs[0].LastMs != 0 || cs[1].Cluster != "small" || cs[1].LastMs != t0.UnixMilli() {
+		t.Errorf("clusters: %+v", cs)
+	}
+}
+
+// A rebuild asked for while a rebuild is copying the partitions is not
+// lost when that copy ends: the next synchronisation copies again, even
+// after a restart.
+func TestRebuildAskedDuringRebuild(t *testing.T) {
+	ctx := context.Background()
+	primary, standby, srv, _ := pair(t)
+	h := primary.m.Handler()
+	frozen, release := make(chan struct{}, 1), make(chan struct{})
+	srv.serve(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/partitions/") {
+			select {
+			case frozen <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+		h.ServeHTTP(w, r)
+	}))
+	if err := standby.m.Rebuild(ctx, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	synced := make(chan error, 1)
+	go func() { synced <- standby.m.SyncOnce(ctx) }()
+	<-frozen
+	if err := standby.m.Rebuild(ctx, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-synced; err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	standby.m.mu.Lock()
+	pending := standby.m.rebuild
+	standby.m.mu.Unlock()
+	if !pending {
+		t.Error("the rebuild asked for during a rebuild was cleared")
+	}
+	standby.start(srv.URL)
+	if !standby.m.rebuild {
+		t.Error("the rebuild asked for during a rebuild was lost by a restart")
 	}
 }

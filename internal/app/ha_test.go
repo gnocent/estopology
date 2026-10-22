@@ -17,7 +17,9 @@ import (
 
 	"estopo/internal/api"
 	"estopo/internal/ha"
+	"estopo/internal/record"
 	"estopo/internal/sim"
+	"estopo/internal/store"
 )
 
 type haNode struct {
@@ -74,8 +76,8 @@ func (n *haNode) lastTs() int64 {
 }
 
 func (n *haNode) collecting() int {
-	n.a.mu.Lock()
-	defer n.a.mu.Unlock()
+	n.a.syncMu.Lock()
+	defer n.a.syncMu.Unlock()
 	return len(n.a.running)
 }
 
@@ -227,6 +229,92 @@ func TestHighAvailability(t *testing.T) {
 	}
 	if a2.collecting() != 0 {
 		t.Error("demoted instance collects")
+	}
+}
+
+// The purge of a cluster (admin) removes its spooled records too: the
+// standby purges it at its next cycle, and neither instance brings it back
+// from its spool at the next start.
+func TestPurgeReachesStandbyAndSurvivesRestart(t *testing.T) {
+	token := filepath.Join(t.TempDir(), "token")
+	os.WriteFile(token, []byte("a-shared-replication-token\n"), 0o600)
+	dirA, dirB := t.TempDir(), t.TempDir()
+	a := startNode(t, dirA, token, "")
+	now := time.Now().UTC()
+	c := sim.Build(sim.PresetSmall("9.5.4"), now)
+	for _, id := range []string{"small", "other"} { // a primary left without any cluster blocks the standby
+		if err := a.a.pipeline.Record(c.CaptureAt(now.UnixMilli(), id, record.Full, record.TriggerSchedule)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFor(t, "ingestion on A", func() bool { return a.a.Idle() && len(partitions(t, a.a, "other")) == 1 })
+	b := startNode(t, dirB, token, a.srv.URL)
+	waitFor(t, "B catches up", func() bool { return len(partitions(t, b.a, "other")) == 1 && b.a.Idle() })
+
+	if rec := a.do("POST", "/api/v1/admin/clusters/other/purge", ""); rec.Code != 200 {
+		t.Fatalf("purge: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(dirA, "spool", "other")); !os.IsNotExist(err) {
+		t.Errorf("spool of the purged cluster on A: %v", err)
+	}
+	waitFor(t, "B purges", func() bool { return len(partitions(t, b.a, "other")) == 0 })
+	if _, err := os.Stat(filepath.Join(dirB, "spool", "other")); !os.IsNotExist(err) {
+		t.Errorf("spool of the purged cluster on B: %v", err)
+	}
+
+	b.stop()
+	a.stop()
+	a = startNode(t, dirA, token, "")
+	b = startNode(t, dirB, token, a.srv.URL)
+	if n, m := len(partitions(t, a.a, "other")), len(partitions(t, b.a, "other")); n != 0 || m != 0 {
+		t.Errorf("purged cluster back after a restart: %d partitions on A, %d on B", n, m)
+	}
+	if len(partitions(t, a.a, "small")) != 1 || len(partitions(t, b.a, "small")) != 1 {
+		t.Error("the other cluster lost its history")
+	}
+}
+
+func partitions(t *testing.T, a *App, cluster string) []store.PartitionInfo {
+	t.Helper()
+	parts, err := a.Store().Partitions(context.Background(), cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parts
+}
+
+// Close waits for the replication and the retention to end before the
+// store is closed: a synchronisation is not left running on a closed store.
+func TestCloseWaitsForReplication(t *testing.T) {
+	token := filepath.Join(t.TempDir(), "token")
+	os.WriteFile(token, []byte("a-shared-replication-token\n"), 0o600)
+	var calls atomic.Int64
+	held, release := make(chan struct{}, 1), make(chan struct{})
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 { // the first status request waits
+			held <- struct{}{}
+			<-release
+		}
+		w.Write([]byte(`{"role":"primary","instance_id":"0123456789abcdef"}`))
+	}))
+	defer primary.Close()
+	defer close(release)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a, err := New(ctx, Options{DataDir: t.TempDir(), Log: slog.New(slog.NewTextHandler(io.Discard, nil)), LoopbackOnly: true,
+		ReplicationTokenFile: token, StandbyOf: primary.URL, HAInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	<-held
+	a.Close() // ctx still alive, as when Close is deferred before the cancel
+	release <- struct{}{}
+	time.Sleep(300 * time.Millisecond)
+	if n := calls.Load(); n != 1 {
+		t.Errorf("the replication went on after Close: %d requests", n)
 	}
 }
 

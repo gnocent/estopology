@@ -19,6 +19,7 @@
   let lBindPw = $state('');
   let lUserBase = $state('');
   let lUserFilter = $state('');
+  let lUserAttr = $state('');
   let lGroupBase = $state('');
   let lGroupFilter = $state('');
   let lAdmins = $state('');
@@ -38,6 +39,7 @@
       bind_password_file: lBindPw,
       user_base: lUserBase,
       user_filter: lUserFilter || undefined,
+      user_attr: lUserAttr || undefined,
       group_base: lGroupBase,
       group_filter: lGroupFilter || undefined,
       admin_groups: lines(lAdmins),
@@ -65,6 +67,7 @@
         lBindPw = l.bind_password_file;
         lUserBase = l.user_base;
         lUserFilter = l.user_filter ?? '';
+        lUserAttr = l.user_attr ?? '';
         lGroupBase = l.group_base;
         lGroupFilter = l.group_filter ?? '';
         lAdmins = (l.admin_groups ?? []).join('\n');
@@ -126,6 +129,7 @@
       <label><span>{t('admin.ldap.bindPassword')}</span><input type="text" bind:value={lBindPw} /></label>
       <label><span>{t('admin.ldap.userBase')}</span><input type="text" bind:value={lUserBase} /></label>
       <label><span>{t('admin.ldap.userFilter')}</span><input type="text" class="mono" placeholder="(&(objectClass=inetOrgPerson)(uid={'{user}'}))" bind:value={lUserFilter} /></label>
+      <label><span>{t('admin.ldap.userAttr')}</span><input type="text" class="mono" placeholder="uid" bind:value={lUserAttr} /></label>
       <label><span>{t('admin.ldap.groupBase')}</span><input type="text" bind:value={lGroupBase} /></label>
       <label><span>{t('admin.ldap.groupFilter')}</span><input type="text" class="mono" placeholder={t('admin.ldap.groupFilterDefault')} bind:value={lGroupFilter} /></label>
       <label class="wide"><span>{t('admin.ldap.adminGroups')}</span><textarea rows="2" bind:value={lAdmins}></textarea></label>

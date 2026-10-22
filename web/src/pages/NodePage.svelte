@@ -26,7 +26,11 @@
     const ctrl = new AbortController();
     api.node(cluster, name, { at, from, to, points: 1200 }, ctrl.signal).then(
       (x) => ((d = x), (error = '')),
-      (e) => (e as Error).name !== 'AbortError' && (error = (e as Error).message),
+      (e) => {
+        if ((e as Error).name === 'AbortError') return;
+        d = null;
+        error = (e as Error).message;
+      },
     );
     return () => ctrl.abort();
   });
@@ -86,7 +90,7 @@
 <PageHelp id="node" />
 {#if error}<div class="banner warn">{t('common.error', { msg: error })}</div>{/if}
 {#if !d}
-  <p class="muted loading">{t('common.loading')}</p>
+  {#if !error}<p class="muted loading">{t('common.loading')}</p>{/if}
 {:else}
   <div class="grid">
     <div class="left">

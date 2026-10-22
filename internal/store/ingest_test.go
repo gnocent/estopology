@@ -273,6 +273,100 @@ func TestUpgradeSettingsRemote(t *testing.T) {
 	}
 }
 
+// SPEC §6.4: ts_lo is the last capture where the old state was seen. A failed
+// probe in between saw nothing: the window starts before it, also across a
+// week change and a restart.
+func TestSettingsRemoteWindowSkipsFailedProbes(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		e := newTEnv(t)
+		e.full(0)
+		e.ingest(&record.Record{Format: record.FormatVersion, Cluster: "small", Kind: record.Light, StartMs: e.at(nextWeek),
+			EndMs: e.at(nextWeek), Status: record.Failed, Error: "timeout"})
+		if restart {
+			e.st.Close()
+			e.open()
+		}
+		e.c.Do(func(c *sim.Cluster) {
+			c.SetClusterSetting(false, "cluster.routing.allocation.enable", "primaries")
+			c.SetRemoteConnected("other", false)
+		})
+		e.probe(nextWeek + 5*time.Minute)
+		want := fmt.Sprintf("|%d|%d|", e.at(0), e.at(nextWeek+5*time.Minute))
+		for _, typ := range []string{evClusterSettingsChanged, evRemoteDisconnected} {
+			if ev := e.events(nextWeek, typ); len(ev) != 1 || !strings.Contains(ev[0], want) {
+				t.Errorf("restart=%v: %s %v, want window %s", restart, typ, ev, want)
+			}
+		}
+	}
+}
+
+// _all/_settings failed (the capture stays ok, SPEC §5.5): the settings of the
+// indices seen for the first time are unknown, and learning them at the next
+// capture is not a change.
+func TestUnknownIndexSettingsAreNotChanged(t *testing.T) {
+	e := newTEnv(t)
+	r := e.c.CaptureAt(e.at(0), "small", record.Full, record.TriggerSchedule)
+	r.IndexSettings = nil
+	e.ingest(r)
+	if n := e.count(0, `SELECT count(*) FROM index_iv WHERE settings_blob IS NULL`); n != len(e.c.Indices) {
+		t.Fatalf("test assumption: %d indices without settings", n)
+	}
+	e.full(10 * time.Minute)
+	if ev := e.events(0, evIndexSettingsChanged); len(ev) != 0 {
+		t.Errorf("%d index_settings_changed events, first: %s", len(ev), ev[0])
+	}
+	// An index created while _all/_settings fails: a replica change seen with
+	// its first settings is still reported.
+	e.c.Do(func(c *sim.Cluster) { c.CreateIndex("late-1", 1, 1, 1000, nil) })
+	r = e.c.CaptureAt(e.at(20*time.Minute), "small", record.Full, record.TriggerSchedule)
+	r.IndexSettings = nil
+	e.ingest(r)
+	r = e.c.CaptureAt(e.at(30*time.Minute), "small", record.Full, record.TriggerSchedule)
+	for i := range r.Indices {
+		if r.Indices[i].Name == "late-1" {
+			r.Indices[i].Rep = 2
+		}
+	}
+	e.ingest(r)
+	ev := e.events(0, evIndexSettingsChanged)
+	if len(ev) != 1 || !strings.Contains(ev[0], `{"from":"1","key":"index.number_of_replicas","to":"2"}`) {
+		t.Errorf("index_settings_changed %v", ev)
+	}
+}
+
+// The same, with a week change between the absence and the return: the
+// result does not depend on a restart of estopo (SPEC §6.7), and the node
+// copied for the comparison is not in the state of the new week.
+func TestUpgradeAcrossAnAbsenceAndAWeekChange(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		e := newTEnv(t)
+		const node = "small-hot-dc1-m01-2"
+		e.full(0)
+		e.c.Do(func(c *sim.Cluster) { c.NodeLeave(node) })
+		e.full(10 * time.Minute) // the node is absent from this capture
+		if res := e.probe(nextWeek); !res.Keyframe {
+			t.Fatal("no keyframe")
+		}
+		if restart {
+			e.st.Close()
+			e.open()
+		}
+		if n := e.count(nextWeek, `SELECT count(*) FROM node_info i JOIN node n ON n.id = i.node_id
+			WHERE n.name = ? AND (i.valid_to IS NULL OR i.valid_to > ?)`, node, e.at(nextWeek)); n != 0 {
+			t.Errorf("restart=%v: the absent node has %d node_info intervals open in the new week", restart, n)
+		}
+		e.c.Do(func(c *sim.Cluster) {
+			c.SetNodeVersion(node, "9.5.4")
+			c.NodeJoin(node)
+		})
+		e.full(nextWeek + 10*time.Minute)
+		ev := e.events(nextWeek, evNodeUpgraded)
+		if len(ev) != 1 || !strings.HasPrefix(ev[0], node+"|") || !strings.Contains(ev[0], `"es":"8.19.22"`) {
+			t.Errorf("restart=%v: node_upgraded events: %v", restart, ev)
+		}
+	}
+}
+
 // B7: a partial capture closes nothing.
 func TestPartialCaptureClosesNothing(t *testing.T) {
 	e := newTEnv(t)

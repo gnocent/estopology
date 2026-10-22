@@ -207,6 +207,20 @@ func (s *Server) handleAdminAuthPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if c.SessionHours == 0 {
+		c.SessionHours = auth.DefaultSessionHours
+	}
+	if c.SessionHours < 1 || c.SessionHours > auth.MaxSessionHours {
+		s.fail(w, r, badRequest("session_hours must be between 1 and 720"))
+		return
+	}
+	s.usersMu.Lock()
+	defer s.usersMu.Unlock()
+	oldMode, err := s.authMode(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	if c.Mode != auth.ModeNone {
 		users, err := s.store.Users(ctx)
 		if err != nil {
@@ -224,16 +238,24 @@ func (s *Server) handleAdminAuthPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if c.SessionHours == 0 {
-		c.SessionHours = auth.DefaultSessionHours
-	}
-	if c.SessionHours < 1 || c.SessionHours > auth.MaxSessionHours {
-		s.fail(w, r, badRequest("session_hours must be between 1 and 720"))
-		return
-	}
 	if err := s.store.SetSetting(ctx, "auth", c); err != nil {
 		s.fail(w, r, err)
 		return
+	}
+	if oldMode != c.Mode {
+		// The sessions of the previous mode end: otherwise local -> none ->
+		// local would bring them back. A local administrator keeps the
+		// session it is using.
+		keep := ""
+		if c.Mode != auth.ModeNone {
+			if u, err := s.store.User(ctx, s.user(r).Name); err == nil && u.Source == "local" {
+				keep = auth.SessionHash(r)
+			}
+		}
+		if err := auth.RevokeAllSessions(ctx, s.store, keep); err != nil {
+			s.fail(w, r, err)
+			return
+		}
 	}
 	s.store.Audit(ctx, s.user(r).Name, "auth.mode", c.Mode, "")
 	writeJSON(w, http.StatusOK, c)
@@ -299,6 +321,20 @@ func (s *Server) handleAdminSaveUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := store.User{Name: name, Role: body.Role, Source: "local", Disabled: body.Disabled}
+	if body.Password != "" {
+		// Hashed before taking usersMu: it takes ~100 ms.
+		if err := validPassword(body.Password); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		var err error
+		if u.Password, err = auth.HashPasswordContext(ctx, body.Password); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
+	s.usersMu.Lock()
+	defer s.usersMu.Unlock()
 	existing, err := s.store.User(ctx, name)
 	exists := err == nil
 	switch {
@@ -317,16 +353,6 @@ func (s *Server) handleAdminSaveUser(w http.ResponseWriter, r *http.Request) {
 			return
 		} else if last {
 			writeError(w, http.StatusConflict, "last_admin", "the last local admin account cannot be disabled or demoted")
-			return
-		}
-	}
-	if body.Password != "" {
-		if err := validPassword(body.Password); err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		if u.Password, err = auth.HashPasswordContext(ctx, body.Password); err != nil {
-			s.fail(w, r, err)
 			return
 		}
 	}
@@ -357,6 +383,8 @@ func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, badRequest("you cannot delete your own account"))
 		return
 	}
+	s.usersMu.Lock()
+	defer s.usersMu.Unlock()
 	if u, err := s.store.User(ctx, name); err == nil {
 		if last, err := s.lastAdmin(r, u); err != nil {
 			s.fail(w, r, err)

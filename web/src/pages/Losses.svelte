@@ -12,7 +12,7 @@
   import ExportMenu from '../components/ExportMenu.svelte';
 
   let { cluster }: { cluster: string } = $props();
-  const win = $derived(abWindow());
+  const win = abWindow();
   const showDeleted = $derived(router.query.get('deleted') === '1');
 
   let l = $state<Losses | null>(null);
@@ -28,13 +28,14 @@
     return () => ctrl.abort();
   });
 
-  // Colour of a counter: what was lost is orange, what stayed unavailable
-  // red, a promoted replica blue, what was repaired green.
+  // Colour of a counter: what was lost, or promoted but still one copy
+  // short, is orange, what stayed unavailable red, what was repaired green;
+  // a deleted index has no tone (nothing left to repair).
   const tones: Record<string, string> = {
     lost: 'orange',
     primaries_lost: 'orange',
     not_promoted: 'red',
-    promoted: 'blue',
+    promoted: 'orange',
     reallocated: 'green',
     still_unassigned: 'red',
   };
@@ -89,15 +90,16 @@
         <tbody>
           {#each g.copies as c, i (c.uuid + c.shard + c.primary + i)}
             <tr>
-              <td><a href={href(`/c/${enc(cluster)}/node/${enc(c.node)}`, { at: c.ts_lo })}>{c.node}</a></td>
+              <td><a href={href(`/c/${enc(cluster)}/node/${enc(c.node)}`, { at: c.ts_lo ?? c.ts_hi - 1 })}>{c.node}</a></td>
               <td class="muted">{c.zone ?? ''}</td>
-              <td class="mono"><a href={href(`/c/${enc(cluster)}/index/${enc(c.uuid)}`, { at: win.b })}>{c.index}</a>[{c.shard}]</td>
+              <td class="mono"><a href={href(`/c/${enc(cluster)}/index/${enc(c.uuid)}`, { at: c.ts_lo ?? c.ts_hi - 1 })}>{c.index}</a>[{c.shard}]</td>
               <td>{c.primary ? t('prirep.primary') : t('prirep.replica')}</td>
               <td class="num">{bytes(c.size_bytes)}</td>
               <td class:bad={c.after === 'unassigned'}>
                 {#if c.promoted}<span class="badge">{t('after.promoted')}</span>{/if}
                 {#if c.after === 'reallocated'}{t('after.reallocated', { node: c.after_node ?? '', date: dateTime(c.after_ts) })}
-                {:else if c.after === 'unassigned'}{t('after.unassigned', { reason: c.after_reason ? `(${c.after_reason})` : '' })}{/if}
+                {:else if c.after === 'unassigned'}{t('after.unassigned', { reason: c.after_reason ? `(${c.after_reason})` : '' })}
+                {:else if c.after === 'deleted'}<span class="muted">{t('after.deleted', { date: dateTime(c.after_ts) })}</span>{/if}
               </td>
             </tr>
           {/each}

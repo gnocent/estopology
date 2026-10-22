@@ -26,9 +26,10 @@ type LossSummary struct {
 	Lost            int `json:"lost"`
 	PrimariesLost   int `json:"primaries_lost"`   // primary copies lost
 	NotPromoted     int `json:"not_promoted"`     // primaries lost without a promoted replica
-	Promoted        int `json:"promoted"`         // replicas promoted
+	Promoted        int `json:"promoted"`         // primaries lost, a replica promoted, the copy not rebuilt at B
 	Reallocated     int `json:"reallocated"`      // re-replicated elsewhere
 	StillUnassigned int `json:"still_unassigned"` // at B
+	Deleted         int `json:"deleted"`          // index deleted after the loss, copy not rebuilt
 	DeletedIndices  int `json:"deleted_indices"`
 }
 
@@ -55,7 +56,8 @@ type LostCopy struct {
 	TsLo      int64  `json:"ts_lo,omitempty"`
 	TsHi      int64  `json:"ts_hi"`
 	// After: promoted (a replica became primary), reallocated (new copy on
-	// AfterNode at AfterTs), unassigned (still unassigned at B, with reason).
+	// AfterNode at AfterTs), deleted (index deleted at AfterTs before the copy
+	// was rebuilt), unassigned (still unassigned at B, with reason).
 	After       string `json:"after"`
 	AfterNode   string `json:"after_node,omitempty"`
 	AfterTs     int64  `json:"after_ts,omitempty"`
@@ -107,8 +109,15 @@ func (e *Engine) Losses(ctx context.Context, cluster string, a, b int64) (*Losse
 	zoneOf := map[string]string{}
 	awareness := ""
 	if stA != nil {
-		if aw := strings.Split(stA.ClusterSettings["cluster.routing.allocation.awareness.attributes"], ","); len(aw) > 0 {
-			awareness = strings.TrimSpace(aw[0])
+		// Set in the cluster settings, or else in the node configuration
+		// (defaults), as for the allocation constraints.
+		const key = "cluster.routing.allocation.awareness.attributes"
+		v, ok := stA.ClusterSettings[key]
+		if !ok {
+			v = stA.Defaults[key]
+		}
+		if aw := strings.Split(strings.Trim(strings.TrimSpace(v), "[]"), ","); len(aw) > 0 { // defaults: a JSON list
+			awareness = strings.Trim(strings.TrimSpace(aw[0]), `"`)
 		}
 		for _, n := range stA.Nodes {
 			zoneOf[n.Name] = n.Attrs[awareness]
@@ -152,18 +161,33 @@ func (e *Engine) Losses(ctx context.Context, cluster string, a, b int64) (*Losse
 				lost = append(lost, lc)
 				byShard[ev.Ref] = append(byShard[ev.Ref], lc)
 			case "shard_promoted":
+				// Only a copy lost before (or with) the event: byShard is in
+				// chronological order.
 				for _, lc := range byShard[ev.Ref] {
-					if lc.Primary && !lc.Promoted {
+					if lc.Primary && !lc.Promoted && lc.TsHi <= ev.TsHi {
 						lc.Promoted = true
 						break
 					}
 				}
 			case "shard_assigned":
+				// The oldest copy lost before (or with) this assignment, of the
+				// same type when there is one (a new replica also rebuilds a
+				// lost primary replaced by its promoted replica).
+				var pick *LostCopy
 				for _, lc := range byShard[ev.Ref] {
-					if lc.After == "unassigned" && lc.AfterNode == "" {
-						lc.After, lc.AfterNode, lc.AfterTs = "reallocated", p.Node, ev.TsHi
+					if lc.After != "unassigned" || lc.AfterNode != "" || lc.TsHi > ev.TsHi {
+						continue
+					}
+					if lc.Primary == p.Primary {
+						pick = lc
 						break
 					}
+					if pick == nil {
+						pick = lc
+					}
+				}
+				if pick != nil {
+					pick.After, pick.AfterNode, pick.AfterTs = "reallocated", p.Node, ev.TsHi
 				}
 			}
 		}
@@ -187,6 +211,17 @@ func (e *Engine) Losses(ctx context.Context, cluster string, a, b int64) (*Losse
 	for _, lc := range lost {
 		if lc.Primary && lc.Promoted && lc.After == "unassigned" {
 			lc.After = "promoted"
+		}
+	}
+	// A copy still unassigned when its index is deleted afterwards: deleted
+	// (SPEC §7.6), it will not be rebuilt.
+	deletedAt := map[string]int64{}
+	for _, d := range out.Deleted {
+		deletedAt[d.UUID] = d.Ts
+	}
+	for _, lc := range lost {
+		if ts, ok := deletedAt[lc.UUID]; ok && ts >= lc.TsHi && lc.After == "unassigned" {
+			lc.After, lc.AfterTs, lc.AfterReason = "deleted", ts, ""
 		}
 	}
 	e.fillLostSizes(ctx, cluster, lost)
@@ -247,6 +282,8 @@ func (e *Engine) Losses(ctx context.Context, cluster string, a, b int64) (*Losse
 			out.Summary.Promoted++
 		case "reallocated":
 			out.Summary.Reallocated++
+		case "deleted":
+			out.Summary.Deleted++
 		default:
 			out.Summary.StillUnassigned++
 		}

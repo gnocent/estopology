@@ -92,8 +92,9 @@ var fr = map[string]string{
 	"reason.lose_machine":                  "Infaisable si l'on perd une machine",
 	// Diff (SPEC §8.2.5) and losses (§7.6).
 	"change.added": "Ajouté", "change.removed": "Supprimé", "change.changed": "Modifié",
-	"change.moved": "Déplacé", "change.lost": "Perdu", "change.new": "Nouveau",
+	"change.moved": "Déplacé", "change.lost": "Perdu", "change.new": "Nouveau", "change.promoted": "Promu",
 	"after.promoted": "Réplica promu", "after.reallocated": "Réalloué", "after.unassigned": "Toujours non assigné",
+	"after.deleted": "Index supprimé",
 	"sheet.summary": "Synthèse", "sheet.nodes": "Nœuds", "sheet.indices": "Indices", "sheet.shards": "Shards",
 	"sheet.index_settings": "Settings d’index", "sheet.cluster_settings": "Cluster settings", "sheet.remotes": "CCS", "sheet.events": "Événements",
 	"sheet.losses": "Pertes", "sheet.deleted": "Suppressions", "sheet.constraints": "Contraintes",
@@ -109,8 +110,8 @@ var fr = map[string]string{
 	"summary.indices_added": "Indices créés", "summary.indices_removed": "Indices supprimés", "summary.indices_changed": "Indices modifiés",
 	"summary.shards_moved": "Copies déplacées", "summary.shards_lost": "Copies perdues", "summary.shards_new": "Nouvelles copies",
 	"summary.settings_changed": "Indices aux settings modifiés", "summary.cluster_settings_changed": "Cluster settings modifiés",
-	"summary.remotes_changed": "Remotes CCS modifiés",
-	"prirep.p":                "Primaire", "prirep.r": "Réplica",
+	"summary.remotes_changed": "Remotes CCS modifiés", "summary.shards_promoted": "Réplicas promus",
+	"prirep.p": "Primaire", "prirep.r": "Réplica",
 }
 
 var en = map[string]string{
@@ -156,8 +157,9 @@ var en = map[string]string{
 	"reason.lose_node":                     "Infeasible if a node is lost",
 	"reason.lose_machine":                  "Infeasible if a machine is lost",
 	"change.added":                         "Added", "change.removed": "Removed", "change.changed": "Changed",
-	"change.moved": "Moved", "change.lost": "Lost", "change.new": "New",
+	"change.moved": "Moved", "change.lost": "Lost", "change.new": "New", "change.promoted": "Promoted",
 	"after.promoted": "Replica promoted", "after.reallocated": "Reallocated", "after.unassigned": "Still unassigned",
+	"after.deleted": "Index deleted",
 	"sheet.summary": "Summary", "sheet.nodes": "Nodes", "sheet.indices": "Indices", "sheet.shards": "Shards",
 	"sheet.index_settings": "Index settings", "sheet.cluster_settings": "Cluster settings", "sheet.remotes": "CCS", "sheet.events": "Events",
 	"sheet.losses": "Losses", "sheet.deleted": "Deletions", "sheet.constraints": "Constraints",
@@ -173,6 +175,6 @@ var en = map[string]string{
 	"summary.indices_added": "Indices created", "summary.indices_removed": "Indices deleted", "summary.indices_changed": "Indices changed",
 	"summary.shards_moved": "Copies moved", "summary.shards_lost": "Copies lost", "summary.shards_new": "New copies",
 	"summary.settings_changed": "Indices with changed settings", "summary.cluster_settings_changed": "Cluster settings changed",
-	"summary.remotes_changed": "CCS remotes changed",
-	"prirep.p":                "Primary", "prirep.r": "Replica",
+	"summary.remotes_changed": "CCS remotes changed", "summary.shards_promoted": "Replicas promoted",
+	"prirep.p": "Primary", "prirep.r": "Replica",
 }

@@ -1,10 +1,12 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -382,5 +384,161 @@ func TestTmpDirCountedAndCleaned(t *testing.T) {
 	}
 	if _, err := os.Stat(left); !os.IsNotExist(err) {
 		t.Errorf("file left in tmp: %v", err)
+	}
+}
+
+// A catalogue row whose file is gone (a deletion interrupted by a crash, a
+// file removed by hand) is a deleted partition: the instance still starts,
+// the row is dropped, and the history goes on from the partition before.
+func TestCatalogueRowWithoutFile(t *testing.T) {
+	e := newTEnv(t)
+	e.full(0)
+	e.full(nextWeek)
+	parts, _ := e.st.Partitions(e.ctx, "small")
+	if len(parts) != 2 {
+		t.Fatalf("partitions %+v", parts)
+	}
+	e.st.Close()
+	abs := filepath.Join(e.dir, filepath.FromSlash(parts[1].Path))
+	for _, f := range []string{abs, abs + "-wal", abs + "-shm"} {
+		if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	e.open()
+	if last, err := e.in.LastTs(e.ctx, "small"); err != nil || last != e.at(0) {
+		t.Fatalf("last record: %d %v, want %d", last, err, e.at(0))
+	}
+	if left, _ := e.st.Partitions(e.ctx, "small"); len(left) != 1 || left[0].Week != parts[0].Week {
+		t.Errorf("catalogue %+v", left)
+	}
+	if res := e.full(nextWeek + time.Hour); !res.Keyframe {
+		t.Errorf("first record of the week after the lost partition: %+v", res)
+	}
+}
+
+// spooled returns r as the standby, the start-up replay and the retries read
+// it: encoded then decoded.
+func spooled(t *testing.T, r *record.Record) *record.Record {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := record.Encode(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	got, err := record.Decode(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// The last index deleted and the last CCS remote removed: the record read
+// back from the spool closes the same intervals as the record in memory.
+func TestEmptyListsFromTheSpoolCloseIntervals(t *testing.T) {
+	e := newTEnv(t)
+	e.ingest(spooled(t, e.c.CaptureAt(e.at(0), "small", record.Full, record.TriggerSchedule)))
+	if n := e.count(0, `SELECT count(*) FROM remote_iv WHERE valid_to IS NULL`); n == 0 {
+		t.Fatal("test assumption: the cluster has a remote")
+	}
+	e.c.Do(func(c *sim.Cluster) {
+		for len(c.Indices) > 0 {
+			c.DeleteIndex(c.Indices[0].Name)
+		}
+		c.Remotes = nil
+	})
+	r := spooled(t, e.c.CaptureAt(e.at(10*time.Minute), "small", record.Full, record.TriggerSchedule))
+	e.ingest(r)
+	for _, tbl := range []string{"index_iv", "shard_iv", "remote_iv"} {
+		if n := e.count(0, `SELECT count(*) FROM `+tbl+` WHERE valid_to IS NULL`); n != 0 {
+			t.Errorf("%s: %d intervals still open", tbl, n)
+		}
+	}
+}
+
+// LastIngested reads the marker of the latest partition holding a record,
+// as load does, without waiting for an ingestion in progress (cluster lock
+// held here) nor loading the mirror.
+func TestLastIngestedReadsTheMarker(t *testing.T) {
+	e := newTEnv(t)
+	if last, err := e.st.LastIngested(e.ctx, "small"); err != nil || last != 0 {
+		t.Fatalf("no history: %d %v", last, err)
+	}
+	e.full(0)
+	e.full(time.Hour)
+	if err := e.in.Note(e.ctx, "small", e.at(nextWeek), EventClusterUUIDChanged, 1, map[string]string{"bound": "a", "seen": "b"}); err != nil {
+		t.Fatal(err)
+	}
+	e.in.Forget("small")
+	l := e.in.clusterLock("small")
+	l.Lock()
+	defer l.Unlock()
+	if last, err := e.st.LastIngested(e.ctx, "small"); err != nil || last != e.at(time.Hour) {
+		t.Fatalf("last record: %d %v, want %d", last, err, e.at(time.Hour))
+	}
+	e.in.mu.Lock()
+	_, loaded := e.in.clusters["small"]
+	e.in.mu.Unlock()
+	if loaded {
+		t.Error("the mirror was loaded")
+	}
+}
+
+// Ingester.Purge holds the lock of the cluster: an ingestion in progress
+// (lock held here) ends before the partitions are deleted, and the next
+// record starts a new history instead of a keyframe of the purged one.
+func TestPurgeWaitsForIngestion(t *testing.T) {
+	e := newTEnv(t)
+	e.full(0)
+	l := e.in.clusterLock("small")
+	l.Lock()
+	removed := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.in.Purge(e.ctx, "small", func() error { close(removed); return nil })
+		done <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-removed:
+		t.Fatal("the purge ran during an ingestion")
+	default:
+	}
+	if parts, _ := e.st.Partitions(e.ctx, "small"); len(parts) != 1 {
+		t.Fatalf("the purge ran during an ingestion: %+v", parts)
+	}
+	l.Unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	<-removed
+	if res := e.full(nextWeek); res.Keyframe {
+		t.Error("keyframe of the purged history")
+	}
+	if parts, _ := e.st.Partitions(e.ctx, "small"); len(parts) != 1 || e.count(nextWeek, `SELECT count(*) FROM capture`) != 1 {
+		t.Errorf("history after the purge: %+v", parts)
+	}
+}
+
+// A record older than the last ingested one is refused; when that last one
+// is more than an hour ahead of the clock, the error says the clock went back.
+func TestRefusalSaysTheClockWentBack(t *testing.T) {
+	e := newTEnv(t) // the clock reads t0
+	// A record just before d (the simulator only moves forward).
+	older := func(d time.Duration) error {
+		r := e.c.CaptureAt(e.at(d), "small", record.Full, record.TriggerSchedule)
+		r.StartMs, r.EndMs = e.at(d)-1, e.at(d)-1
+		_, err := e.in.Ingest(e.ctx, r)
+		return err
+	}
+	e.full(30 * time.Minute)
+	err := older(30 * time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "older than the last ingested") || strings.Contains(err.Error(), "clock") {
+		t.Fatalf("within the tolerance: %v", err)
+	}
+	e.full(3 * time.Hour)
+	err = older(3 * time.Hour)
+	if err == nil || !strings.Contains(err.Error(), "older than the last ingested") ||
+		!strings.Contains(err.Error(), "the history is ahead of the clock by 3h0m0s: the clock went back") {
+		t.Fatalf("ahead of the clock: %v", err)
 	}
 }

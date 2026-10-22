@@ -22,14 +22,18 @@
   const view = $derived(router.query.get('view') === 'logical' ? 'logical' : 'physical');
   const mode = $derived((router.query.get('color') as ColorMode) || 'status');
   // Logical view: which families, and how many of them.
-  const familyFilter = $derived(router.query.get('fq') ?? '');
+  // The text as typed (kept in the URL untrimmed, so the field is not
+  // rewritten while typing) and the filter that is applied.
+  const fq = $derived(router.query.get('fq') ?? '');
+  const familyFilter = $derived(fq.trim());
   const top = $derived(router.num('top') ?? 30);
   const byIndex = $derived(router.query.get('rows') === 'index');
   let typing: ReturnType<typeof setTimeout> | undefined;
   function filterFamilies(v: string) {
     clearTimeout(typing);
-    typing = setTimeout(() => router.set({ fq: v.trim() || null }), 250);
+    typing = setTimeout(() => router.set({ fq: v.trim() ? v : null }), 250);
   }
+  $effect(() => () => clearTimeout(typing));
   // Columns of the logical view: the nodes, or the groups of one level of
   // the hierarchy (zone, tier, machine) with the copies of their nodes added up.
   const colDepth = $derived(router.num('cols') ?? -1);
@@ -90,6 +94,8 @@
 
   let sv = $state<StateView | null>(null);
   let matrix = $state<Matrix | null>(null);
+  let matrixError = $state('');
+  let matrixLoading = $state(false);
   let error = $state('');
   let loading = $state(false);
 
@@ -115,7 +121,20 @@
   $effect(() => {
     if (view !== 'logical') return;
     const ctrl = new AbortController();
-    api.matrix(cluster, at, top, familyFilter, byIndex ? 'index' : '', ctrl.signal).then((m) => (matrix = m), () => {});
+    matrixLoading = true;
+    api.matrix(cluster, at, top, familyFilter, byIndex ? 'index' : '', ctrl.signal).then(
+      (m) => {
+        matrix = m;
+        matrixError = '';
+        matrixLoading = false;
+      },
+      (e) => {
+        if ((e as Error).name === 'AbortError') return;
+        matrix = null;
+        matrixError = (e as Error).message;
+        matrixLoading = false;
+      },
+    );
     return () => ctrl.abort();
   });
 
@@ -131,7 +150,7 @@
   <p class="muted loading">{t('common.loading')}</p>
 {:else}
   {#if sv.unknown}<div class="banner warn">{t('cluster.unknownBand')}</div>{/if}
-  <div class="layout" class:dim={loading}>
+  <div class="layout" class:dim={loading || (view === 'logical' && matrixLoading)}>
     <div class="main">
       <div class="row head">
         <h1><Icon name="topology" size={20} /> {sv.name}</h1>
@@ -219,7 +238,7 @@
           <Info text={t('matrix.rowsHelp')} />
           <label class="row">
             <span class="muted">{t('matrix.filter')}</span>
-            <input type="search" value={familyFilter} placeholder={byIndex ? t('matrix.filterHintIndex') : t('matrix.filterHint')} oninput={(e) => filterFamilies((e.target as HTMLInputElement).value)} />
+            <input type="search" value={fq} placeholder={byIndex ? t('matrix.filterHintIndex') : t('matrix.filterHint')} oninput={(e) => filterFamilies((e.target as HTMLInputElement).value)} />
           </label>
           <Info text={t('matrix.filterHelp')} />
           <label class="row">
@@ -249,6 +268,8 @@
           onnode={(n) => router.go(nodeHref(cluster, n, { at }))}
           oncolumn={(i) => columns && router.go(groupHref(cluster, columns[i].path, { at }))}
         />
+      {:else if matrixError}
+        <div class="banner warn">{t('common.error', { msg: matrixError })}</div>
       {:else}
         <p class="muted loading">{t('common.loading')}</p>
       {/if}

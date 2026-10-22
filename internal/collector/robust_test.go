@@ -97,3 +97,41 @@ func TestResumeDuringCapture(t *testing.T) {
 		t.Errorf("full captures after the resume: %v", kinds(fulls))
 	}
 }
+
+// A full capture whose _nodes/stats call failed still serves as the
+// reference of the probes: the next probe does not take the cluster for
+// never captured (trigger "first") and start another full capture.
+func TestFullCaptureWithoutNodesStatsStaysTheReference(t *testing.T) {
+	e := newEnv(t)
+	e.srv.SetFault("/_nodes/stats", sim.Fault{Status: http.StatusInternalServerError})
+	e.col.CaptureNow("small", true)
+	waitFor(t, func() bool { return len(e.sink.fulls()) == 2 })
+	if r := e.sink.fulls()[1]; !r.HasStructure() || r.NodesStats != nil {
+		t.Fatalf("manual capture: status %s, error %q", r.Status, r.Error)
+	}
+	e.srv.ClearFaults()
+	e.clk.BlockUntil(1)
+	e.advance(5 * time.Minute)
+	e.advance(10 * time.Minute)
+	if fulls := e.sink.fulls(); len(fulls) != 2 {
+		t.Errorf("full captures after the probes: %v", kinds(fulls))
+	}
+}
+
+// Reset (history purged): the next probe triggers a full capture with the
+// trigger "first", once the minimum interval is over.
+func TestResetStartsOverWithFullCapture(t *testing.T) {
+	e := newEnv(t)
+	if err := e.col.Reset("small"); err != nil {
+		t.Fatal(err)
+	}
+	e.advance(5 * time.Minute)
+	e.advance(10 * time.Minute)
+	fulls := e.sink.fulls()
+	if len(fulls) != 2 || fulls[1].Trigger != record.TriggerFirst {
+		t.Errorf("full captures after the reset: %v", kinds(fulls))
+	}
+	if err := e.col.Reset("other"); err != ErrUnknownCluster {
+		t.Errorf("reset of an unknown cluster: %v", err)
+	}
+}

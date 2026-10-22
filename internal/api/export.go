@@ -192,6 +192,7 @@ func diffTables(d *query.Diff, l i18n.Lang) []table {
 	}{{"nodes_added", d.Summary.NodesAdded}, {"nodes_removed", d.Summary.NodesRemoved}, {"nodes_changed", d.Summary.NodesChanged},
 		{"indices_added", d.Summary.IndicesAdded}, {"indices_removed", d.Summary.IndicesRemoved}, {"indices_changed", d.Summary.IndicesChanged},
 		{"shards_moved", d.Summary.ShardsMoved}, {"shards_lost", d.Summary.ShardsLost}, {"shards_new", d.Summary.ShardsNew},
+		{"shards_promoted", d.Summary.ShardsPromoted},
 		{"settings_changed", d.Summary.SettingsChanged}, {"cluster_settings_changed", d.Summary.ClusterSettings},
 		{"remotes_changed", d.Summary.RemotesChanged}} {
 		sum.rows = append(sum.rows, []any{i18n.T(l, "summary."+kv.k), kv.v})

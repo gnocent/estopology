@@ -175,12 +175,12 @@ func TestPathShowsRoundTrip(t *testing.T) {
 			uuid = ix.UUID
 		}
 	}
-	segs, err := q.e.Path(q.ctx, "small", PathQuery{UUID: uuid, Shard: 0, A: q.ms(0), B: q.ms(end)})
+	path, err := q.e.Path(q.ctx, "small", PathQuery{UUID: uuid, Shard: 0, A: q.ms(0), B: q.ms(end)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var primary []string
-	for _, s := range segs {
+	for _, s := range path.Segments {
 		if s.Primary {
 			primary = append(primary, s.Node+":"+s.State)
 		}
@@ -223,7 +223,9 @@ func TestLosses(t *testing.T) {
 			t.Errorf("copy %+v", c)
 		}
 	}
-	if primaries == 0 || l.Summary.PrimariesLost != primaries || l.Summary.NotPromoted != 0 || l.Summary.Reallocated != l.Summary.Lost {
+	if primaries == 0 || l.Summary.PrimariesLost != primaries || l.Summary.NotPromoted != 0 || l.Summary.Reallocated != l.Summary.Lost ||
+		l.Summary.Promoted != 0 { // promoted and rebuilt: counted as reallocated
+
 		t.Errorf("summary %+v", l.Summary)
 	}
 	if len(l.Deleted) != 1 || l.Deleted[0].Name != deleted {

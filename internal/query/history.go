@@ -84,7 +84,7 @@ func (e *Engine) NodeHistory(ctx context.Context, cluster, name string, a, b int
 		db := p.db()
 		attrHashes := map[string]string{}
 		if err := query(ctx, db, `SELECT n.es_id, n.generation, n.first_seen, pr.valid_from, pr.valid_to FROM node n
-			LEFT JOIN node_presence pr ON pr.node_id = n.id AND pr.valid_from < ? AND (pr.valid_to IS NULL OR pr.valid_to > ?)
+			LEFT JOIN node_presence pr ON pr.node_id = n.id AND pr.valid_from <= ? AND (pr.valid_to IS NULL OR pr.valid_to > ?)
 			WHERE n.name = ?`, []any{b, a, name}, func(r *sql.Rows) error {
 			var esID string
 			var gen int
@@ -107,7 +107,7 @@ func (e *Engine) NodeHistory(ctx context.Context, cluster, name string, a, b int
 		}
 		if err := query(ctx, db, `SELECT n.es_id, i.valid_from, i.valid_to, i.roles, i.ip, i.machine, i.es_version, i.os_name,
 			i.os_kernel, i.jvm_version, i.start_ms, coalesce(i.attrs_blob, '') FROM node_info i JOIN node n ON n.id = i.node_id
-			WHERE n.name = ? AND i.valid_from < ? AND (i.valid_to IS NULL OR i.valid_to > ?)`, []any{name, b, a},
+			WHERE n.name = ? AND i.valid_from <= ? AND (i.valid_to IS NULL OR i.valid_to > ?)`, []any{name, b, a},
 			func(r *sql.Rows) error {
 				var ip NodeInfoPeriod
 				var to sql.NullInt64
@@ -235,7 +235,7 @@ func (e *Engine) IndexHistory(ctx context.Context, cluster, uuid string, a, b in
 		var hashes []string
 		var froms []int64
 		if err := query(ctx, db, `SELECT valid_from, valid_to, status, pri, rep, coalesce(settings_blob, '') FROM index_iv
-			WHERE index_id = ? AND valid_from < ? AND (valid_to IS NULL OR valid_to > ?)`, []any{id, b, a}, func(r *sql.Rows) error {
+			WHERE index_id = ? AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)`, []any{id, b, a}, func(r *sql.Rows) error {
 			var ip IndexPeriod
 			var to sql.NullInt64
 			var hash string

@@ -45,6 +45,9 @@ type remoteCluster struct {
 	Partitions []remotePartition `json:"partitions"`
 	OldestMs   int64             `json:"oldest_spooled_ms,omitempty"`
 	NewestMs   int64             `json:"newest_spooled_ms,omitempty"`
+	// LastMs is the newest record ingested: it says how far the history
+	// goes when the spool no longer holds anything of the cluster.
+	LastMs int64 `json:"last_ingested_ms,omitempty"`
 }
 
 type remoteRecord struct {
@@ -154,6 +157,15 @@ func (m *Manager) handleClusters(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]remoteCluster, 0, len(byID))
 	for _, c := range byID {
+		// Read from the store, not the ingestion: no wait for an ingestion
+		// in progress, no mirror loaded. A cluster in error stays listed
+		// (left out, the standby would purge it), without its date.
+		if len(c.Partitions) > 0 {
+			if c.LastMs, err = m.o.Store.LastIngested(r.Context(), c.Cluster); err != nil {
+				m.o.Log.Warn("replication API: last ingested record unknown", "cluster", c.Cluster, "err", err)
+				c.LastMs = 0
+			}
+		}
 		out = append(out, *c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Cluster < out[j].Cluster })

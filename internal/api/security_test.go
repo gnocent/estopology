@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -597,5 +599,123 @@ func TestExportFormulaInjection(t *testing.T) {
 	}
 	if v, _ := x.GetCellValue(sheet, "A2"); !strings.HasPrefix(v, "=HYPERLINK") {
 		t.Errorf("XLSX text cell: %q", v)
+	}
+}
+
+// session opens a session of name without a login (no password hashing).
+func (e *authEnv) session(name string) (*http.Cookie, string) {
+	e.t.Helper()
+	c := &http.Cookie{Name: auth.CookieName, Value: "session-of-" + name}
+	req := httptest.NewRequest("GET", "/", nil)
+	req.AddCookie(c)
+	if err := e.st.CreateSession(context.Background(), store.Session{TokenHash: auth.SessionHash(req), User: name, CSRF: "csrf-" + name,
+		CreatedMs: t0.UnixMilli(), ExpiresMs: t0.Add(time.Hour).UnixMilli()}); err != nil {
+		e.t.Fatal(err)
+	}
+	return c, "csrf-" + name
+}
+
+// Two administrators deleting each other at the same time never leave the
+// instance without a local administrator.
+func TestLastAdminRace(t *testing.T) {
+	e := newAuthEnv(t, Transport{LoopbackOnly: true})
+	e.localMode("root:admin")
+	ctx := context.Background()
+	h, _ := auth.HashPassword(testPassword)
+	for round := 0; round < 30; round++ {
+		a, b := fmt.Sprintf("a%d", round), fmt.Sprintf("b%d", round)
+		for _, n := range []string{a, b} {
+			e.st.SaveUser(ctx, store.User{Name: n, Role: auth.RoleAdmin, Source: "local", Password: h})
+		}
+		if round == 0 {
+			e.st.DeleteUser(ctx, "root")
+		} else {
+			e.st.DeleteUser(ctx, fmt.Sprintf("a%d", round-1))
+			e.st.DeleteUser(ctx, fmt.Sprintf("b%d", round-1))
+		}
+		ca, xa := e.session(a)
+		cb, xb := e.session(b)
+		var wg sync.WaitGroup
+		for _, c := range []call{
+			{method: "DELETE", path: "/api/v1/admin/users/" + b, cookie: ca, csrf: xa},
+			{method: "DELETE", path: "/api/v1/admin/users/" + a, cookie: cb, csrf: xb},
+		} {
+			wg.Add(1)
+			go func() { defer wg.Done(); e.do(c) }()
+		}
+		wg.Wait()
+		users, _ := e.st.Users(ctx)
+		left := 0
+		for _, u := range users {
+			if localAdmin(u) {
+				left++
+			}
+		}
+		if left == 0 {
+			t.Fatalf("round %d: no local admin left", round)
+		}
+		if left == 2 {
+			t.Fatalf("round %d: neither deletion went through", round)
+		}
+		// Back to two admins named a<round>, b<round> for the cleanup above.
+		e.st.SaveUser(ctx, store.User{Name: a, Role: auth.RoleAdmin, Source: "local", Password: h})
+		e.st.SaveUser(ctx, store.User{Name: b, Role: auth.RoleAdmin, Source: "local", Password: h})
+	}
+}
+
+// Changing the authentication mode ends the sessions of the previous mode:
+// local -> none -> local does not bring them back. The local administrator
+// making a change between local and LDAP keeps its session.
+func TestModeChangeRevokesSessions(t *testing.T) {
+	e := newAuthEnv(t, Transport{LoopbackOnly: true})
+	e.localMode("alice:admin", "bob:reader")
+	alive := func(c *http.Cookie) bool {
+		return e.do(call{method: "GET", path: "/api/v1/clusters", cookie: c}).Code == 200
+	}
+	alice, csrf := e.session("alice")
+	bob, _ := e.session("bob")
+	if rec := e.do(call{method: "PUT", path: "/api/v1/admin/auth", body: `{"mode":"none"}`, cookie: alice, csrf: csrf}); rec.Code != 200 {
+		t.Fatalf("switch to none: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := e.do(call{method: "PUT", path: "/api/v1/admin/auth", body: `{"mode":"local"}`}); rec.Code != 200 {
+		t.Fatalf("back to local: %d %s", rec.Code, rec.Body.String())
+	}
+	if alive(alice) || alive(bob) {
+		t.Errorf("sessions resurrected: alice %v bob %v", alive(alice), alive(bob))
+	}
+
+	// local -> ldap by alice: bob's session ends, alice's goes on.
+	srv := ldaptest.Start(t)
+	cfg := auth.LDAPConfig{URLs: []string{srv.URL}, CAFile: srv.CAFile, BindDN: ldaptest.ServiceDN,
+		BindPasswordFile: srv.BindPasswordFile, UserBase: ldaptest.PeopleBase, GroupBase: ldaptest.GroupBase,
+		AdminGroups: []string{ldaptest.AdminGroupDN}, ReaderGroups: []string{ldaptest.ReaderGroupDN}}
+	alice, csrf = e.session("alice")
+	bob, _ = e.session("bob")
+	body, _ := json.Marshal(auth.Config{Mode: auth.ModeLDAP, LDAP: &cfg})
+	if rec := e.do(call{method: "PUT", path: "/api/v1/admin/auth", body: string(body), cookie: alice, csrf: csrf}); rec.Code != 200 {
+		t.Fatalf("switch to ldap: %d %s", rec.Code, rec.Body.String())
+	}
+	if !alive(alice) || alive(bob) {
+		t.Errorf("after local -> ldap: alice %v (want true) bob %v (want false)", alive(alice), alive(bob))
+	}
+	// Same mode, other settings: nobody is logged out.
+	bob, _ = e.session("bob")
+	body, _ = json.Marshal(auth.Config{Mode: auth.ModeLDAP, LDAP: &cfg, SessionHours: 24})
+	if rec := e.do(call{method: "PUT", path: "/api/v1/admin/auth", body: string(body), cookie: alice, csrf: csrf}); rec.Code != 200 {
+		t.Fatalf("session hours: %d %s", rec.Code, rec.Body.String())
+	}
+	if !alive(bob) {
+		t.Error("session ended by a change that keeps the mode")
+	}
+}
+
+// An invalid number of points is refused instead of returning the whole
+// history of the node.
+func TestNodePointsValidated(t *testing.T) {
+	e := newAuthEnv(t, Transport{LoopbackOnly: true})
+	for _, p := range []string{"abc", "1", "999999"} {
+		if rec := e.do(call{method: "GET", path: "/api/v1/clusters/c/nodes/n1?points=" + p}); rec.Code != 400 {
+			t.Errorf("points=%s: %d %s", p, rec.Code, rec.Body.String())
+		}
 	}
 }

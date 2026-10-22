@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"estopo/internal/auth"
@@ -38,6 +39,9 @@ type Options struct {
 	// OnConfigChange is called after the cluster configuration changed, so
 	// that the collector restarts the affected workers.
 	OnConfigChange func(ctx context.Context) error
+	// Purge deletes the history of a cluster, spooled records included
+	// (nil: the partitions only, Store.Purge).
+	Purge func(ctx context.Context, cluster string) (int, error)
 	// HA is the high-availability manager (nil: a primary without replication).
 	HA HA
 	// ExtraMetrics adds application metrics to /metrics (metric(name, type, help, value, label pairs...)).
@@ -68,9 +72,11 @@ type Server struct {
 	engine       *query.Engine
 	collector    Collector
 	onConfig     func(ctx context.Context) error
+	purge        func(ctx context.Context, cluster string) (int, error)
 	ha           HA
 	extraMetrics func(metric func(name, typ, help string, value float64, labels ...string))
-	home         homeCache // home screen summaries
+	home         homeCache  // home screen summaries
+	usersMu      sync.Mutex // the checks of the last admin and the writes they guard
 	auth         *auth.Service
 	transport    Transport
 	secretsDir   string
@@ -81,7 +87,7 @@ type Server struct {
 // New builds the HTTP handler tree.
 func New(o Options) *Server {
 	s := &Server{log: o.Log, clock: o.Clock, store: o.Store, engine: o.Engine, collector: o.Collector,
-		onConfig: o.OnConfigChange, ha: o.HA, extraMetrics: o.ExtraMetrics, started: o.Clock.Now(), mux: http.NewServeMux(),
+		onConfig: o.OnConfigChange, purge: o.Purge, ha: o.HA, extraMetrics: o.ExtraMetrics, started: o.Clock.Now(), mux: http.NewServeMux(),
 		auth: o.Auth, transport: o.Transport, secretsDir: o.SecretsDir}
 	m := s.mux
 	m.HandleFunc("GET /healthz", s.handleHealthz)

@@ -4,6 +4,61 @@
 
 This file describes what each published version of ES.Topo contains. The binaries of each version are on the [releases page](../../releases).
 
+## 0.8.1-beta
+
+Fixes from a review of the whole code, each one covered by a test.
+
+### Upgrading from 0.8.0-beta
+
+- **LDAP mode**: the account name is now read from the entry found by the search, attribute `uid` by default. If your entries have no `uid` (Active Directory), fill in the new "Account name attribute" field (for instance `sAMAccountName`) before upgrading, otherwise directory logins are refused; local accounts keep working.
+- The data and `meta.db` keep their format. Upgrade the primary and the standby together.
+
+### Security
+
+- LDAP mode: a login with an empty name no longer opens a session (it was accepted without a password); a session whose account has no known role is refused.
+- LDAP mode: the account is named by the entry found, not by the typed name. With a filter on `uid` or `mail`, the address of a disabled person opened a second, enabled account.
+- LDAP mode: a login without a local account costs the same password computation as a local account; the response time no longer tells which local accounts exist.
+- Login throttling: a successful login no longer resets the count of its address; the holder of an account can no longer try the passwords of the others without limit. The names that the account lookup takes for one another (`ſam` and `sam`) share their count.
+- Two administrators deleting each other at the same time no longer leave the instance without a local administrator.
+- Changing the authentication mode ends the open sessions; the local administrator making the change keeps its own. Before, local → none → local brought them back.
+- Standby: a password change, a new role, a disabled or deleted account on the primary end the sessions of the standby too; an LDAP account deleted on the primary disappears from the standby.
+- An invalid `points` parameter of the node history is refused instead of returning the whole history.
+- Go 1.27.3 and a fixed excelize: `govulncheck` reports no vulnerability.
+
+### Collection
+
+- Changing the configuration of a cluster could freeze the instance when the ingestion was late; a cluster suspended after an identity change could no longer be reconfigured or disabled.
+- Binding a cluster no longer restarts its collection with an extra full capture.
+- The maximum interval forces a full capture even when the probes keep failing; the schedule runs on a monotonic clock (a clock stepping back no longer delays the probes).
+- A full capture whose only failures are side calls (`_nodes/stats`, `_cat/allocation`, `_cluster/settings`, `_remote/info`) keeps its structure: the failed section is unknown, not empty.
+
+### Storage
+
+- A history ahead of the clock of the instance by more than an hour (clock gone back after a jump forward) is reported: in the error refusing the new readings, in the `estopo_history_ahead_seconds` metric and as a banner of the Collectors page.
+- Empty lists (last index deleted, last remote removed) survive the spool: the standby and the replay close the same intervals as the primary.
+- The retention by size never deletes the last partition of a cluster.
+- A catalogue row left without its file by a crash no longer prevents the start.
+- Uncertainty windows of the cluster settings and remote events, unknown index settings, node upgrades across a week change: fixed.
+
+### High availability
+
+- A rebuild asked for (button, demotion) survives a restart, and is no longer lost when asked for during a rebuild in progress; a standby lagging behind an empty spool catches up; a purge reaches the standby and does not come back at the next start; the replication block indicator no longer flickers; stopping waits for the replication; the clusters list of the replication API no longer waits for the ingestion.
+
+### Exploration
+
+- Family filters (path, events, search) follow the family rules.
+- Losses: chronological matching, copies of an index deleted afterwards counted apart, zone read from the node settings too.
+- Group metrics no longer collapse between two readings of a stable node.
+- Diff: a promoted replica is shown as promoted, not moved; no false change for a node without description or from a probe without structure.
+- Path: the position taken at B is shown, the order is stable, a truncation is signalled. **API**: `GET /clusters/{id}/path` now returns `{"segments": [...], "truncated": true}`.
+- Allocation constraints: `high.max_headroom` (8.5+), `disk.threshold_enabled: false` and `require` with several values are taken into account; a node without the attribute does not satisfy `require.<attribute>: "*"`, as in Elasticsearch.
+- Losses: the "Replicas promoted" counter becomes "Promoted, copy to rebuild at B": it only counts the primaries taken over whose missing copy was not re-created yet (the others are in "Reallocated"). The index link of a lost copy opens it at the date of the loss.
+
+### Interface
+
+- The home page no longer fails when a node holding a primary and a replica of the same shard is lost.
+- The A/B window shown is the one queried; the time band follows the current time; stale answers no longer overwrite recent ones; API errors are shown instead of an endless "Loading"; changing a tab or a colour no longer reloads everything; the HA peer field is no longer cleared while typing.
+
 ## 0.8.0-beta
 
 First public release. This is a beta version: the product has been tested against real test clusters running Elasticsearch 7.17.29, 8.19.22 and 9.5.4 and on simulated data, not yet in production at scale. The data format and the API may still change before version 1.0.

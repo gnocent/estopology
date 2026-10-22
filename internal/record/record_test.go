@@ -57,6 +57,49 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	}
 }
 
+// An empty list (the last index deleted, the last CCS remote removed) is not
+// a missing section: the decoded record says the same as the one ingested
+// directly by the primary.
+func TestEmptyListsSurviveRoundTrip(t *testing.T) {
+	r := sample(1_790_000_000_000)
+	r.Indices, r.IndexSettings, r.Shards, r.Remotes = []esclient.CatIndex{}, []IndexSettings{}, []esclient.CatShard{}, []esclient.Remote{}
+	r.NodesStats, r.Allocation = []esclient.NodeStats{}, []esclient.Allocation{}
+	var buf bytes.Buffer
+	if err := Encode(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Decode(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, r) {
+		t.Errorf("round trip differs:\n got %+v\nwant %+v", got, r)
+	}
+	if got.Remotes == nil || got.Indices == nil || got.Shards == nil || got.IndexSettings == nil || got.NodesStats == nil {
+		t.Errorf("empty lists decoded as missing: %+v", got)
+	}
+	if !got.HasStructure() {
+		t.Error("a full capture of a cluster without index has structure")
+	}
+	var streamed, std bytes.Buffer
+	bw := bufio.NewWriter(&streamed)
+	encodeStreaming(bw, r)
+	bw.Flush()
+	json.NewEncoder(&std).Encode(r)
+	if streamed.String() != std.String() {
+		t.Errorf("streamed:\n%s\nencoding/json:\n%s", streamed.String(), std.String())
+	}
+	// Missing sections stay missing.
+	light := &Record{Format: FormatVersion, Cluster: "c", Kind: Light, Status: OK}
+	buf.Reset()
+	if err := Encode(&buf, light); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = Decode(&buf); err != nil || got.Remotes != nil || got.Indices != nil || got.Shards != nil || got.NodesStats != nil {
+		t.Errorf("missing sections decoded as lists: %+v %v", got, err)
+	}
+}
+
 func TestEncodingIsDeterministic(t *testing.T) {
 	var a, b bytes.Buffer
 	r := sample(1)

@@ -4,7 +4,7 @@
 
 This guide goes from a download to a service running over HTTPS with an administrator account. Follow it from top to bottom. The commands are for Linux; a section at the end covers Windows and macOS.
 
-ES.Topo is a beta version (0.8.0-beta): install it on a test machine first.
+ES.Topo is a beta version (0.8.1-beta): install it on a test machine first.
 
 Related guides: [declaring a cluster](clusters.md), [authentication](authentication.md), [high availability](high-availability.md), [operations](operations.md), [security](../SECURITY.md).
 
@@ -40,7 +40,7 @@ Related guides: [declaring a cluster](clusters.md), [authentication](authenticat
    ./estopo-linux-amd64 version
    ```
 
-   Expected result: a line starting with `estopo 0.8.0-beta`.
+   Expected result: a line starting with `estopo 0.8.1-beta`.
 
 The binaries are not signed: the checksum only proves that the file is the one that was published.
 
@@ -57,7 +57,7 @@ Without any setting, ES.Topo:
 - listens on `127.0.0.1:8080`, over HTTP, reachable from this machine only;
 - creates a `data` directory next to the binary;
 - has no authentication: every visitor is an administrator;
-- writes its logs to standard output. The first line looks like `level=INFO msg=starting version=0.8.0-beta listen=127.0.0.1:8080 data_dir=… tls=false secrets_dir=""`.
+- writes its logs to standard output. The first line looks like `level=INFO msg=starting version=0.8.1-beta listen=127.0.0.1:8080 data_dir=… tls=false secrets_dir=""`.
 
 Open `http://127.0.0.1:8080` in a browser on the same machine. To stop, press Ctrl+C.
 
@@ -164,7 +164,7 @@ HTTPS is required as soon as the service is reachable from another machine with 
    curl https://estopo.example.org:8443/healthz
    ```
 
-   Expected result: `{"status":"ok","version":"0.8.0-beta","role":"primary","uptime":"…"}`. If `curl` rejects the certificate, add `--cacert` followed by the file of your CA. Also open the port in the firewall of the machine if needed.
+   Expected result: `{"status":"ok","version":"0.8.1-beta","role":"primary","uptime":"…"}`. If `curl` rejects the certificate, add `--cacert` followed by the file of your CA. Also open the port in the firewall of the machine if needed.
 
 Good to know:
 
@@ -266,7 +266,7 @@ Good to know:
 
 - At start-up, ES.Topo updates the structure of its databases by itself when the new version requires it. This only goes forward: **going back to an older version is not supported**. To go back, restore the backup.
 - With high availability, both instances must run the same version: see [High availability](high-availability.md#upgrading-both-instances).
-- 0.8.0-beta is the first published version: no upgrade from an earlier version has been exercised yet.
+- The upgrade from 0.8.1-beta to 0.8.1-beta has been exercised on a simulated data directory. Read the upgrade notes of the [changelog](../CHANGELOG.md#upgrading-from-080-beta) first (LDAP mode).
 
 ## Uninstalling
 

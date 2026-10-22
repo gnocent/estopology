@@ -67,6 +67,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 				susp = 1
 			}
 			p.metric("estopo_cluster_suspended", "gauge", "Collection suspended (cluster identity changed).", susp, "cluster", st.ID)
+			if _, d, err := s.store.HistoryAhead(r.Context(), st.ID); err == nil {
+				p.metric("estopo_history_ahead_seconds", "gauge", "How far the last ingested record is ahead of the clock beyond an hour (newer records refused: the clock went back).", d.Seconds(), "cluster", st.ID)
+			}
 			if c := st.LastProbe; c != nil {
 				p.metric("estopo_probe_last_timestamp_seconds", "gauge", "Start of the last light probe.", float64(c.StartMs)/1000, "cluster", st.ID)
 				p.metric("estopo_probe_last_duration_seconds", "gauge", "Duration of the last light probe.", float64(c.DurationMs)/1000, "cluster", st.ID)

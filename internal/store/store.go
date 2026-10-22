@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -190,8 +192,8 @@ func (s *Store) OpenExisting(ctx context.Context, info PartitionInfo) (*Partitio
 	if p, ok := s.parts[rel]; ok {
 		return p, nil
 	}
-	// DeletePartition holds the same lock from the close to the catalogue
-	// update: what is still registered here still has its file.
+	// DeletePartition holds the same lock from the catalogue update to the
+	// removal of the file: what is still registered here had its file.
 	var n int
 	if err := s.Meta.QueryRowContext(ctx, `SELECT count(*) FROM partition WHERE cluster_id = ? AND week = ?`,
 		info.Cluster, info.Week).Scan(&n); err != nil {
@@ -200,7 +202,15 @@ func (s *Store) OpenExisting(ctx context.Context, info PartitionInfo) (*Partitio
 	if n == 0 {
 		return nil, fmt.Errorf("%s/%s: %w", info.Cluster, info.Week, ErrNoPartition)
 	}
-	if _, err := os.Stat(filepath.Join(s.dir, rel)); err != nil {
+	if _, err := os.Stat(filepath.Join(s.dir, rel)); errors.Is(err, fs.ErrNotExist) {
+		// Registered without a file: a deletion by an older version interrupted
+		// between the two steps, or a file removed by hand. The partition is
+		// deleted; a row left behind would stop every reader of the cluster.
+		if _, err := s.Meta.ExecContext(ctx, `DELETE FROM partition WHERE cluster_id = ? AND week = ?`, info.Cluster, info.Week); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%s/%s: file missing, removed from the catalogue: %w", info.Cluster, info.Week, ErrNoPartition)
+	} else if err != nil {
 		return nil, err
 	}
 	return s.openLocked(ctx, info.Cluster, WeekOf(info.FromMs))
@@ -230,6 +240,65 @@ func (s *Store) Partitions(ctx context.Context, cluster string) ([]PartitionInfo
 	return out, rows.Err()
 }
 
+// LastIngested returns the date of the last record ingested for a cluster
+// (0 if none), read from the last_ts marker of its latest marked partition,
+// as Ingester.load picks it. Unlike Ingester.LastTs, it neither waits for an
+// ingestion in progress nor loads the mirror: the marker is written in the
+// transaction of each record, and read on the reading connections.
+func (s *Store) LastIngested(ctx context.Context, cluster string) (int64, error) {
+	parts, err := s.Partitions(ctx, cluster)
+	if err != nil {
+		return 0, err
+	}
+	for i := len(parts) - 1; i >= 0; i-- {
+		p, err := s.OpenExisting(ctx, parts[i])
+		if errors.Is(err, ErrNoPartition) {
+			continue
+		}
+		if err != nil {
+			return 0, fmt.Errorf("open partition %s of %s: %w", parts[i].Week, cluster, err)
+		}
+		var v string
+		err = p.rdb.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'last_ts'`).Scan(&v)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		return strconv.ParseInt(v, 10, 64)
+	}
+	return 0, nil
+}
+
+// ClockTolerance is how far the last ingested record of a cluster may be
+// ahead of the clock (SPEC §6.7). Beyond it, the clock went back after
+// records were ingested: the next ones are refused as older until the clock
+// catches up.
+const ClockTolerance = time.Hour
+
+// aheadOf returns how far lastMs is ahead of now, 0 within ClockTolerance.
+func aheadOf(lastMs int64, now time.Time) time.Duration {
+	if d := time.UnixMilli(lastMs).Sub(now); d > ClockTolerance {
+		return d
+	}
+	return 0
+}
+
+// HistoryAhead returns the date of the last record ingested for a cluster
+// and how far it is ahead of the clock, both 0 within ClockTolerance.
+func (s *Store) HistoryAhead(ctx context.Context, cluster string) (int64, time.Duration, error) {
+	last, err := s.LastIngested(ctx, cluster)
+	if err != nil {
+		return 0, 0, err
+	}
+	d := aheadOf(last, s.clock.Now())
+	if d == 0 {
+		return 0, 0, nil
+	}
+	return last, d, nil
+}
+
 // RefreshSize records the on-disk size of a partition (database + WAL).
 func (s *Store) RefreshSize(ctx context.Context, p *Partition) (int64, error) {
 	abs := filepath.Join(s.dir, p.Path)
@@ -255,17 +324,18 @@ func (s *Store) Seal(ctx context.Context, p *Partition) error {
 	return err
 }
 
-// DeletePartition closes, unregisters and removes a partition file. The
+// DeletePartition unregisters, closes and removes a partition file. The
 // lock is held throughout: a concurrent OpenExisting must not reopen the
-// partition between its close and the removal of its file.
+// partition between its close and the removal of its file. The catalogue
+// goes first: a crash in between leaves an unregistered file, which nothing
+// reads, rather than a row without its file.
 func (s *Store) DeletePartition(ctx context.Context, info PartitionInfo) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.removeLocked(filepath.FromSlash(info.Path), false); err != nil {
+	if _, err := s.Meta.ExecContext(ctx, `DELETE FROM partition WHERE cluster_id = ? AND week = ?`, info.Cluster, info.Week); err != nil {
 		return err
 	}
-	_, err := s.Meta.ExecContext(ctx, `DELETE FROM partition WHERE cluster_id = ? AND week = ?`, info.Cluster, info.Week)
-	return err
+	return s.removeLocked(filepath.FromSlash(info.Path), false)
 }
 
 // removeLocked closes a partition and removes its files (s.mu held). With

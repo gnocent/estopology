@@ -111,7 +111,7 @@ func (w *writer) nodeInfos(nodes []esclient.NodeInfo) error {
 		if _, err := w.exec(`UPDATE node_info SET valid_to = ? WHERE rowid = ?`, w.ts, ns.infoRow); err != nil {
 			return err
 		}
-		ns.prevInfo, ns.info = ns.info, nil
+		ns.prevInfo, ns.prevSince, ns.prevTo, ns.info = ns.info, ns.infoSince, w.ts, nil
 	}
 	return nil
 }
@@ -246,8 +246,14 @@ func (w *writer) indexChangeEvents(is *indexState, old, cur *indexIV) error {
 		}
 	}
 	if old.settings != cur.settings || old.pri != cur.pri || old.rep != cur.rep {
-		changes := diffMaps(old.settingsMap, cur.settingsMap)
-		if old.rep != cur.rep && old.settings == cur.settings {
+		// Settings unknown on one side (_all/_settings failed, or the index
+		// came after it) are not compared: learning them is not a change.
+		known := old.settings != "" && cur.settings != ""
+		var changes []map[string]string
+		if known {
+			changes = diffMaps(old.settingsMap, cur.settingsMap)
+		}
+		if old.rep != cur.rep && (old.settings == cur.settings || !known) {
 			changes = append(changes, map[string]string{"key": "index.number_of_replicas", "from": strconv.Itoa(old.rep), "to": strconv.Itoa(cur.rep)})
 		}
 		if len(changes) > 0 {

@@ -47,7 +47,10 @@ type ClusterConfig struct {
 
 // Sink receives every record (spool + ingestion).
 type Sink interface {
-	Record(r *record.Record) error
+	// Record hands r over. It gives up waiting, without error, once stop is
+	// closed: the worker is being stopped and must not wait for the
+	// ingestion.
+	Record(r *record.Record, stop <-chan struct{}) error
 }
 
 // Events lets the owner persist bindings and raise admin alerts.
@@ -66,6 +69,8 @@ type Collector struct {
 	sink    Sink
 	events  Events
 	fullSem chan struct{}
+	origin  time.Time // time.Now at New, with its monotonic reading (see mono)
+	wall0   time.Time // clock reading at New
 
 	mu      sync.Mutex
 	workers map[string]*worker
@@ -78,7 +83,25 @@ func New(clk clock.Clock, log *slog.Logger, sink Sink, events Events, maxFull in
 		maxFull = 3
 	}
 	return &Collector{clock: clk, log: log, sink: sink, events: events,
-		fullSem: make(chan struct{}, maxFull), workers: map[string]*worker{}}
+		fullSem: make(chan struct{}, maxFull), origin: time.Now(), wall0: clk.Now(), workers: map[string]*worker{}}
+}
+
+// monotonic is implemented by clocks with a monotonic reading besides their
+// wall time (tests).
+type monotonic interface{ monotonic() time.Duration }
+
+// mono is the time elapsed since New on a clock that never steps back: the
+// schedule runs on it, the records keep the wall time. clock.Real reads the
+// wall clock (NTP step, restored VM); the manual and scaled clocks never
+// step back.
+func (c *Collector) mono() time.Duration {
+	switch k := c.clock.(type) {
+	case monotonic:
+		return k.monotonic()
+	case clock.Real:
+		return time.Since(c.origin) // time.Now keeps its monotonic reading, which clock.Real's UTC drops
+	}
+	return c.clock.Now().Sub(c.wall0)
 }
 
 // Add starts collecting a cluster.
@@ -153,6 +176,19 @@ func (c *Collector) CaptureNow(id string, force bool) error {
 	w.force = w.force || force
 	w.mu.Unlock()
 	w.poke()
+	return nil
+}
+
+// Reset makes the worker of a cluster forget its last full capture (its
+// history was purged): the next probe triggers a full capture ("first").
+func (c *Collector) Reset(id string) error {
+	w := c.worker(id)
+	if w == nil {
+		return ErrUnknownCluster
+	}
+	w.mu.Lock()
+	w.reset = true
+	w.mu.Unlock()
 	return nil
 }
 

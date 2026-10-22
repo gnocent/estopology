@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -261,6 +262,45 @@ func TestLDAPLoginKeepsLocalAccount(t *testing.T) {
 	}
 }
 
+// A blank name never logs in: for ldapAuthenticate it is a connection test,
+// which succeeds on the service bind alone. And a session of an account
+// without a known role (such as one left by that flaw) opens nothing.
+func TestLDAPLoginBlankName(t *testing.T) {
+	ctx := context.Background()
+	srv := ldaptest.Start(t)
+	svc, st := newTestService(t)
+	c := ldapConfig(srv)
+	if err := st.SetSetting(ctx, "auth", Config{Mode: ModeLDAP, LDAP: &c}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"", "   "} {
+		for _, pw := range []string{"", "x"} {
+			if u, err := svc.Login(ctx, httptest.NewRecorder(), loginFrom("10.0.0.1"), name, pw); !errors.Is(err, ErrInvalid) {
+				t.Errorf("name %q, password %q: %+v %v", name, pw, u, err)
+			}
+		}
+	}
+	if _, err := st.User(ctx, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("account recorded for a blank name: %v", err)
+	}
+
+	ghost := store.User{Name: "ghost", Source: "ldap"}
+	if err := st.SaveUser(ctx, ghost); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	if _, err := svc.open(ctx, rec, loginFrom("10.0.0.1"), ghost); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("GET", "/api/v1/clusters", nil)
+	for _, ck := range rec.Result().Cookies() {
+		r.AddCookie(ck)
+	}
+	if u, err := svc.Resolve(ctx, r); !errors.Is(err, ErrUnauthenticated) {
+		t.Errorf("session of an account without role: %+v %v", u, err)
+	}
+}
+
 // ESTOPO_SECRETS_DIR also holds at login time, for a configuration saved
 // before the variable was set.
 func TestLDAPLoginSecretsDir(t *testing.T) {
@@ -275,5 +315,59 @@ func TestLDAPLoginSecretsDir(t *testing.T) {
 	}
 	if len(srv.Binds()) != 0 {
 		t.Errorf("the directory was contacted: %v", srv.Binds())
+	}
+}
+
+// A successful login only clears the keys of its account: the holder of
+// one account cannot reset, by logging in, the count of the failures of
+// its address on the other accounts.
+func TestSuccessKeepsAddressFailures(t *testing.T) {
+	svc, _ := newTestService(t)
+	for i := 0; i < 5; i++ {
+		if _, err := svc.reserve(loginFrom("10.6.6.6"), fmt.Sprintf("victim%d", i)); err != nil {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+		if i == 4 {
+			break
+		}
+		at, err := svc.reserve(loginFrom("10.6.6.6"), "eve")
+		if err != nil {
+			t.Fatalf("login %d of the account holder: %v", i, err)
+		}
+		at.success()
+	}
+	if _, err := svc.reserve(loginFrom("10.6.6.6"), "victim9"); !errors.Is(err, ErrThrottled) {
+		t.Errorf("6th failure from the address after successful logins: %v", err)
+	}
+	// The successes themselves are not counted against the address.
+	svc2, _ := newTestService(t)
+	for i := 0; i < 20; i++ {
+		at, err := svc2.reserve(loginFrom("10.7.7.7"), fmt.Sprintf("user%d", i))
+		if err != nil {
+			t.Fatalf("successful login %d from one address: %v", i, err)
+		}
+		at.success()
+	}
+}
+
+// The names that the lookup of local accounts takes for the same account
+// (strings.EqualFold) share their limiter keys: "ſam" is "sam".
+func TestLimiterKeysFoldLikeAccounts(t *testing.T) {
+	svc, _ := newTestService(t)
+	if !strings.EqualFold("ſam", "sam") {
+		t.Fatal("EqualFold no longer matches ſam and sam")
+	}
+	for i := 0; i < 50; i++ {
+		if _, err := svc.reserve(loginFrom(fmt.Sprintf("10.1.0.%d", i)), "sam"); err != nil {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+	}
+	for _, n := range []string{"SAM", "ſam", "ſAM"} {
+		if _, err := svc.reserve(loginFrom("10.2.0.1"), n); !errors.Is(err, ErrThrottled) {
+			t.Errorf("%q escapes the limit of sam: %v", n, err)
+		}
+	}
+	if foldName("µ") != foldName("μ") || foldName("ς") != foldName("Σ") {
+		t.Errorf("fold orbits: µ %q μ %q, ς %q Σ %q", foldName("µ"), foldName("μ"), foldName("ς"), foldName("Σ"))
 	}
 }

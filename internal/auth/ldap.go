@@ -27,8 +27,9 @@ type LDAPConfig struct {
 	BindPasswordFile string   `json:"bind_password_file"`
 	UserBase         string   `json:"user_base"`
 	UserFilter       string   `json:"user_filter,omitempty"` // {user}: escaped login name
+	UserAttr         string   `json:"user_attr,omitempty"`   // attribute of the entry naming the account (default uid)
 	GroupBase        string   `json:"group_base"`
-	GroupFilter      string   `json:"group_filter,omitempty"` // {dn}: user DN, {user}: login name (escaped)
+	GroupFilter      string   `json:"group_filter,omitempty"` // {dn}: user DN, {user}: account name (escaped)
 	AdminGroups      []string `json:"admin_groups"`
 	ReaderGroups     []string `json:"reader_groups"`
 	TimeoutSeconds   int      `json:"timeout_s,omitempty"`
@@ -38,11 +39,13 @@ type LDAPConfig struct {
 // posixGroup groups.
 const (
 	DefaultUserFilter  = "(&(objectClass=inetOrgPerson)(uid={user}))"
+	DefaultUserAttr    = "uid"
 	DefaultGroupFilter = "(|(&(objectClass=groupOfNames)(member={dn}))(&(objectClass=groupOfUniqueNames)(uniqueMember={dn}))(&(objectClass=posixGroup)(memberUid={user})))"
 )
 
 func (c LDAPConfig) userFilter() string  { return cmp(c.UserFilter, DefaultUserFilter) }
 func (c LDAPConfig) groupFilter() string { return cmp(c.GroupFilter, DefaultGroupFilter) }
+func (c LDAPConfig) userAttr() string    { return cmp(c.UserAttr, DefaultUserAttr) }
 
 func cmp(v, def string) string {
 	if strings.TrimSpace(v) == "" {
@@ -87,6 +90,9 @@ func (c LDAPConfig) Validate() error {
 	if !strings.Contains(c.userFilter(), "{user}") {
 		return errors.New("the user filter must contain {user}")
 	}
+	if !validAttr(c.userAttr()) {
+		return fmt.Errorf("invalid user attribute %q", c.userAttr())
+	}
 	if len(c.AdminGroups) == 0 && len(c.ReaderGroups) == 0 {
 		return errors.New("at least one admin or reader group is required")
 	}
@@ -98,10 +104,25 @@ func (c LDAPConfig) Validate() error {
 	return nil
 }
 
+// validAttr reports whether a is an attribute description (RFC 4512: a
+// letter, then letters, digits and hyphens).
+func validAttr(a string) bool {
+	for i, r := range a {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+		case i > 0 && (r >= '0' && r <= '9' || r == '-'):
+		default:
+			return false
+		}
+	}
+	return a != ""
+}
+
 // LDAPResult is the outcome of a successful LDAP authentication.
 type LDAPResult struct {
 	Server string   `json:"server"`
 	UserDN string   `json:"user_dn"`
+	Name   string   `json:"name"` // account name: the user attribute of the entry, lower case
 	Groups []string `json:"groups"`
 	Role   string   `json:"role"`
 }
@@ -163,7 +184,7 @@ func ldapAuthenticate(c LDAPConfig, name, password string, trace func(LDAPStep))
 
 	filter := strings.ReplaceAll(c.userFilter(), "{user}", ldap.EscapeFilter(name))
 	sr, err := conn.Search(ldap.NewSearchRequest(c.UserBase, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases,
-		2, int(c.timeout().Seconds()), false, filter, []string{"1.1"}, nil))
+		2, int(c.timeout().Seconds()), false, filter, []string{c.userAttr()}, nil))
 	switch {
 	case err != nil && !ldap.IsErrorWithCode(err, ldap.LDAPResultSizeLimitExceeded):
 		step("user_search", err, "")
@@ -174,7 +195,16 @@ func ldapAuthenticate(c LDAPConfig, name, password string, trace func(LDAPStep))
 		return res, ErrInvalid
 	}
 	res.UserDN = sr.Entries[0].DN
-	step("user_search", nil, res.UserDN)
+	// The account is named by the entry found, not by the typed name: a
+	// filter matching several attributes (uid or mail) must not give the
+	// same person a second account, outside a disabled one.
+	ids := sr.Entries[0].GetEqualFoldAttributeValues(c.userAttr())
+	if len(ids) != 1 || strings.TrimSpace(ids[0]) == "" {
+		step("user_search", fmt.Errorf("%s: the entry must have exactly one %s", res.UserDN, c.userAttr()), "")
+		return res, ErrInvalid
+	}
+	res.Name = strings.ToLower(ids[0])
+	step("user_search", nil, res.UserDN+" ("+c.userAttr()+"="+ids[0]+")")
 
 	err = conn.Bind(res.UserDN, password)
 	step("user_bind", err, "")
@@ -190,7 +220,7 @@ func ldapAuthenticate(c LDAPConfig, name, password string, trace func(LDAPStep))
 		step("group_search", err, "")
 		return res, fmt.Errorf("%w: service account: %v", ErrUnavailable, err)
 	}
-	gf := strings.NewReplacer("{dn}", ldap.EscapeFilter(res.UserDN), "{user}", ldap.EscapeFilter(name)).Replace(c.groupFilter())
+	gf := strings.NewReplacer("{dn}", ldap.EscapeFilter(res.UserDN), "{user}", ldap.EscapeFilter(ids[0])).Replace(c.groupFilter())
 	gr, err := conn.Search(ldap.NewSearchRequest(c.GroupBase, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases,
 		1000, int(c.timeout().Seconds()), false, gf, []string{"1.1"}, nil))
 	if err != nil && !ldap.IsErrorWithCode(err, ldap.LDAPResultSizeLimitExceeded) {

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"estopo/internal/clock"
 	"estopo/internal/store"
@@ -199,7 +200,7 @@ type attempt struct {
 // ErrThrottled.
 func (s *Service) reserve(r *http.Request, name string) (attempt, error) {
 	ip := clientIP(r)
-	user := "user:" + strings.ToLower(shortName(name))
+	user := "user:" + foldName(shortName(name))
 	a := attempt{s: s, keys: []string{user + "|" + ip, "ip:" + ip}, user: user, name: shortName(name), client: ip}
 	if ok, _ := s.limiter.Reserve(a.keys...); !ok {
 		return a, ErrThrottled
@@ -217,9 +218,27 @@ func (a attempt) release() {
 	a.s.global.Release(a.user)
 }
 
+// success clears the account keys. The client address only gets the
+// attempt back: a holder of one account must not wipe out, by logging in,
+// the failures of that address on the other accounts.
 func (a attempt) success() {
-	a.s.limiter.Success(a.keys...)
+	a.s.limiter.Success(a.keys[0])
+	a.s.limiter.Release(a.keys[1])
 	a.s.global.Success(a.user)
+}
+
+// foldName maps a name to a key shared by all the names that
+// strings.EqualFold matches (the lookup of local accounts): each rune is
+// replaced by the smallest rune of its case-folding orbit, so that "ſam"
+// and "sam" are counted together, which strings.ToLower does not do.
+func foldName(name string) string {
+	return strings.Map(func(r rune) rune {
+		m := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			m = min(m, f)
+		}
+		return m
+	}, name)
 }
 
 // failure leaves the attempt counted and records it.
@@ -257,6 +276,11 @@ func (s *Service) localAccount(ctx context.Context, name string) (u store.User, 
 // accounts keep working: they are the way back in when the directory is
 // unavailable or misconfigured (estopo admin reset-password).
 func (s *Service) Login(ctx context.Context, w http.ResponseWriter, r *http.Request, name, password string) (User, error) {
+	if strings.TrimSpace(name) == "" {
+		// ldapAuthenticate takes a blank name for a connection test: it would
+		// succeed on the service bind alone.
+		return User{}, ErrInvalid
+	}
 	cfg, err := s.Config(ctx)
 	if err != nil {
 		return User{}, err
@@ -271,6 +295,12 @@ func (s *Service) Login(ctx context.Context, w http.ResponseWriter, r *http.Requ
 		return User{}, err
 	}
 	if cfg.Mode == ModeLDAP && cfg.LDAP != nil && !local {
+		// Same cost as a local account: the response time must not tell
+		// which local accounts exist.
+		if _, err := VerifyPasswordContext(ctx, dummyHash, password); errors.Is(err, ErrBusy) {
+			at.release()
+			return User{}, err
+		}
 		return s.ldapLogin(ctx, w, r, *cfg.LDAP, name, password, at)
 	}
 	valid := false
@@ -315,8 +345,9 @@ func (s *Service) CheckPassword(ctx context.Context, r *http.Request, u store.Us
 }
 
 // ldapLogin authenticates against the directory and records the account
-// (source "ldap", role from the groups at each login). An account disabled
-// by an administrator stays disabled, and a local account is never replaced.
+// (source "ldap", role from the groups at each login), named by the user
+// attribute of the entry found. An account disabled by an administrator
+// stays disabled, and a local account is never replaced.
 func (s *Service) ldapLogin(ctx context.Context, w http.ResponseWriter, r *http.Request, c LDAPConfig, name, password string, at attempt) (User, error) {
 	name = strings.ToLower(name) // directory names are case-insensitive
 	var res LDAPResult
@@ -332,6 +363,15 @@ func (s *Service) ldapLogin(ctx context.Context, w http.ResponseWriter, r *http.
 		s.log.Warn("LDAP authentication unavailable", "user", at.name, "err", err)
 		s.st.Audit(ctx, at.name, "login.ldap_unavailable", at.client, err.Error())
 		return User{}, err
+	}
+	if err == nil {
+		name = res.Name
+		if _, local, lerr := s.localAccount(ctx, name); lerr != nil {
+			at.release()
+			return User{}, lerr
+		} else if local {
+			err = ErrInvalid
+		}
 	}
 	existing, uerr := s.st.User(ctx, name)
 	switch {
@@ -428,6 +468,13 @@ func RevokeSessions(ctx context.Context, st *store.Store, name, keep string) err
 	return err
 }
 
+// RevokeAllSessions ends the sessions of every account, except the session
+// keep ("" for none).
+func RevokeAllSessions(ctx context.Context, st *store.Store, keep string) error {
+	_, err := st.Meta.ExecContext(ctx, `DELETE FROM session WHERE token_hash <> ?`, keep)
+	return err
+}
+
 // Resolve returns the caller of a request. In mode none everybody is an
 // administrator. The error is ErrUnauthenticated when authentication is
 // required and missing; any other error means that the caller could not be
@@ -463,7 +510,7 @@ func (s *Service) Resolve(ctx context.Context, r *http.Request) (User, error) {
 	} else if err != nil {
 		return User{}, err
 	}
-	if u.Disabled || (u.Source == "ldap" && cfg.Mode != ModeLDAP) {
+	if u.Disabled || (u.Source == "ldap" && cfg.Mode != ModeLDAP) || (u.Role != RoleReader && u.Role != RoleAdmin) {
 		return User{}, ErrUnauthenticated
 	}
 	// Sliding expiry: extend when less than half of the idle timeout is left.

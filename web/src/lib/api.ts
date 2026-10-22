@@ -468,7 +468,7 @@ export interface ShardDiff {
   family: string;
   shard: number;
   primary: boolean;
-  change: 'moved' | 'lost' | 'new';
+  change: 'moved' | 'lost' | 'new' | 'promoted'; // promoted: replica become primary on its node (from = to)
   from: string[] | null;
   to: string[] | null;
 }
@@ -489,6 +489,7 @@ export interface DiffSummary {
   shards_moved: number;
   shards_lost: number;
   shards_new: number;
+  shards_promoted: number;
   settings_changed: number;
   cluster_settings_changed: number;
   remotes_changed: number;
@@ -535,6 +536,12 @@ export interface Segment {
   to?: number;
 }
 
+export interface PathResult {
+  segments: Segment[] | null;
+  /** More segments than the server limit (20 000): only the first ones are kept. */
+  truncated?: boolean;
+}
+
 export interface LostCopy {
   uuid: string;
   index: string;
@@ -545,7 +552,7 @@ export interface LostCopy {
   size_bytes: number;
   ts_lo?: number;
   ts_hi: number;
-  after: 'promoted' | 'reallocated' | 'unassigned';
+  after: 'promoted' | 'reallocated' | 'unassigned' | 'deleted'; // deleted: after_ts = deletion of the index
   after_node?: string;
   after_ts?: number;
   after_reason?: string;
@@ -574,6 +581,7 @@ export interface Losses {
     promoted: number;
     reallocated: number;
     still_unassigned: number;
+    deleted: number;
     deleted_indices: number;
   };
   groups: LossGroup[] | null;
@@ -604,7 +612,7 @@ export const api2 = {
   diff: (c: string, a: number, b: number, s?: AbortSignal) => get<DiffResponse>(`/clusters/${enc(c)}/diff`, { a, b }, s),
   diffSection: <T>(c: string, a: number, b: number, section: string, offset: number, limit: number, s?: AbortSignal) =>
     get<Page<T>>(`/clusters/${enc(c)}/diff`, { a, b, section, offset, limit }, s),
-  path: (c: string, p: Params, s?: AbortSignal) => get<Segment[]>(`/clusters/${enc(c)}/path`, p, s),
+  path: (c: string, p: Params, s?: AbortSignal) => get<PathResult>(`/clusters/${enc(c)}/path`, p, s),
   losses: (c: string, a: number, b: number, s?: AbortSignal) => get<Losses>(`/clusters/${enc(c)}/losses`, { a, b }, s),
   flows: (c: string, p: Params, s?: AbortSignal) => get<Flows>(`/clusters/${enc(c)}/flows`, p, s),
   constraints: (c: string, p: Params, s?: AbortSignal) =>
@@ -719,6 +727,8 @@ export interface CollectorStatus {
   next_probe_ms: number;
   pending_trigger?: string;
   recent_errors?: string[];
+  history_until_ms?: number; // set when the history is ahead of the clock (SPEC §6.7)
+  history_ahead_ms?: number;
 }
 
 export interface ConnectionTest {
@@ -829,6 +839,7 @@ export interface LDAPConfig {
   bind_password_file: string;
   user_base: string;
   user_filter?: string;
+  user_attr?: string;
   group_base: string;
   group_filter?: string;
   admin_groups: string[];

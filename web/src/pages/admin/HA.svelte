@@ -7,15 +7,21 @@
   let st = $state<HAStatus | null>(null);
   let error = $state('');
   let message = $state('');
+  let loadError = $state('');
   let peer = $state('');
+  let peerLoaded = false;
   let demoteURL = $state('');
 
+  // Polled: the peer field is filled by the first answer only, so what is
+  // being typed there is never overwritten.
   async function load() {
     try {
       st = await adminApi.ha();
-      peer = st.peer ?? '';
+      if (!peerLoaded) peer = st.peer ?? '';
+      peerLoaded = true;
+      loadError = '';
     } catch (e) {
-      error = (e as Error).message;
+      loadError = (e as Error).message;
     }
   }
   $effect(() => {
@@ -105,6 +111,7 @@
 {/if}
 {#if message}<p class="ok">{message}</p>{/if}
 {#if error}<p class="bad">{t('common.error', { msg: error })}</p>{/if}
+{#if loadError}<p class="bad">{t('common.error', { msg: loadError })}</p>{/if}
 
 <style>
   dl {

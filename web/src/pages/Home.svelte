@@ -80,7 +80,7 @@
             <td class="num" class:bad={(c.counts?.unassigned ?? 0) > 0}>{num(c.counts?.unassigned)}</td>
             <td>{#each c.versions as v (v)}<span class="badge">{v}</span> {/each}</td>
             <td class="events">
-              {#each c.recent_events.slice(0, 3) as ev (ev.ts_hi + ev.type + ev.subject_ref)}
+              {#each c.recent_events.slice(0, 3) as ev, i (ev.ts_hi + ev.type + ev.subject_ref + i)}
                 <div class="ev">
                   <span class="dot" style:background={`var(--sev-${ev.severity})`}></span>
                   <span use:tip={utc(ev.ts_hi)}>{dateTime(ev.ts_hi)}</span>

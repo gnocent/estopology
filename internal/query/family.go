@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"math"
 	"sort"
 )
@@ -28,6 +29,28 @@ func (e *Engine) IndexSizeHistory(ctx context.Context, cluster, uuid string, a, 
 // first interval to its deletion, with its last known metric.
 func (e *Engine) FamilyHistory(ctx context.Context, cluster, family string, a, b int64, points int) ([]FamilyPoint, error) {
 	return e.sizeHistory(ctx, cluster, a, b, points, func(name, stored, _ string) bool { return e.familyOf(cluster, name, stored) == family })
+}
+
+// familyUUIDs returns the uuids of the indices of a partition that belong to
+// a family under the rules in force (the stored family is the automatic
+// one), as a JSON array: one SQL parameter whatever their number, read with
+// json_each.
+func (e *Engine) familyUUIDs(ctx context.Context, cluster string, p part, family string) (string, error) {
+	uuids := []string{}
+	if err := query(ctx, p.db(), `SELECT uuid, name, family FROM idx`, nil, func(r *sql.Rows) error {
+		var uuid, name, stored string
+		if err := r.Scan(&uuid, &name, &stored); err != nil {
+			return err
+		}
+		if e.familyOf(cluster, name, stored) == family {
+			uuids = append(uuids, uuid)
+		}
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(uuids)
+	return string(data), err
 }
 
 // sizeHistory samples the documents and sizes of the indices kept by keep

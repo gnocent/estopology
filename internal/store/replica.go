@@ -105,7 +105,11 @@ func DecodeMetaSnapshot(data []byte) (MetaSnapshot, error) {
 
 // ImportMeta replaces the replicated tables with a snapshot, in one
 // transaction. Accounts created locally by an LDAP login and unknown to the
-// primary are kept (their sessions stay valid on the standby).
+// primary are kept (their sessions stay valid on the standby), unless the
+// replicated audit shows their deletion on the primary. The local sessions
+// end like on the primary: those of the accounts whose password, role or
+// source changed, or that were disabled or deleted, and all of them when
+// the authentication mode changed.
 func (s *Store) ImportMeta(ctx context.Context, snap MetaSnapshot) error {
 	level, err := s.metaSchemaLevel(ctx)
 	if err != nil {
@@ -119,6 +123,10 @@ func (s *Store) ImportMeta(ctx context.Context, snap MetaSnapshot) error {
 		return err
 	}
 	defer tx.Rollback()
+	usersBefore, modeBefore, err := accountsState(ctx, tx)
+	if err != nil {
+		return err
+	}
 	for _, t := range ReplicatedTables {
 		rows, ok := snap.Tables[t]
 		if !ok {
@@ -155,7 +163,70 @@ func (s *Store) ImportMeta(ctx context.Context, snap MetaSnapshot) error {
 			}
 		}
 	}
+	// An LDAP account deleted on the primary after its creation here.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM user WHERE source = 'ldap' AND EXISTS (SELECT 1 FROM audit a
+		WHERE a.action = 'user.delete' AND a.target = user.name AND a.ts >= user.created_ms)`); err != nil {
+		return err
+	}
+	usersAfter, modeAfter, err := accountsState(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if modeAfter != modeBefore {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM session`); err != nil {
+			return err
+		}
+	}
+	for name, before := range usersBefore {
+		if after, ok := usersAfter[name]; !ok || after != before {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM session WHERE user_name = ?`, name); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session WHERE user_name NOT IN (SELECT name FROM user)`); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+// accountsState returns what ends the sessions of an account when it
+// changes (password, role, source, disabled), by account name, and the
+// authentication mode.
+func accountsState(ctx context.Context, tx *sql.Tx) (map[string]string, string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT name, coalesce(password, ''), role, source, disabled FROM user`)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	users := map[string]string{}
+	for rows.Next() {
+		var name, password, role, source string
+		var disabled bool
+		if err := rows.Scan(&name, &password, &role, &source, &disabled); err != nil {
+			return nil, "", err
+		}
+		users[name] = fmt.Sprintf("%s\x00%s\x00%s\x00%t", password, role, source, disabled)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	var raw string
+	var auth struct {
+		Mode string `json:"mode"`
+	}
+	switch err := tx.QueryRowContext(ctx, `SELECT value FROM setting WHERE key = 'auth'`).Scan(&raw); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return nil, "", err
+	default:
+		// An unreadable setting counts as a mode of its own: any change of
+		// it ends the sessions.
+		if json.Unmarshal([]byte(raw), &auth) != nil {
+			auth.Mode = "\x00" + raw
+		}
+	}
+	return users, auth.Mode, nil
 }
 
 func tableColumns(ctx context.Context, tx *sql.Tx, table string) (map[string]bool, error) {

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"estopo/internal/derive"
 	"estopo/internal/esclient"
@@ -100,6 +101,8 @@ type nodeState struct {
 	presentSince int64
 	info         *nodeInfoVals
 	prevInfo     *nodeInfoVals // last known info of a node absent from the last full capture
+	prevSince    int64         // its interval, closed
+	prevTo       int64
 	infoRow      int64
 	infoSince    int64
 	metric       *nodeMetricVals
@@ -174,6 +177,8 @@ type cstate struct {
 	lastTs         int64 // last record
 	lastPresenceTs int64 // last probe with node presence
 	lastFullTs     int64 // last structural capture
+	lastSettingsTs int64 // last record with the cluster settings
+	lastRemotesTs  int64 // last record with the CCS remotes
 	lastHealth     *esclient.Health
 	lastHealthTs   int64
 
@@ -232,7 +237,11 @@ func (in *Ingester) Ingest(ctx context.Context, r *record.Record) (res Result, e
 		return res, err
 	}
 	if r.StartMs < cs.lastTs {
-		return res, fmt.Errorf("record of %s at %d is older than the last ingested (%d)", r.Cluster, r.StartMs, cs.lastTs)
+		err = fmt.Errorf("record of %s at %d is older than the last ingested (%d)", r.Cluster, r.StartMs, cs.lastTs)
+		if d := aheadOf(cs.lastTs, in.st.clock.Now()); d > 0 {
+			err = fmt.Errorf("%w: the history is ahead of the clock by %s: the clock went back", err, d.Round(time.Second))
+		}
+		return res, err
 	}
 	defer func() {
 		if err != nil { // the mirror may be half-updated: rebuild it from the database next time
@@ -440,11 +449,13 @@ func (w *writer) ingestBody(r *record.Record, keyframe bool, old *Partition) err
 		if err := w.clusterSettings(r.ClusterSettings); err != nil {
 			return err
 		}
+		w.cs.lastSettingsTs = w.ts
 	}
 	if r.Remotes != nil && !r.RemotesUnavailable {
 		if err := w.remotes(r.Remotes); err != nil {
 			return err
 		}
+		w.cs.lastRemotesTs = w.ts
 	}
 	if r.HasStructure() {
 		if err := w.structure(r); err != nil {
@@ -695,7 +706,7 @@ func (w *writer) clusterSettings(s *esclient.ClusterSettings) error {
 		if _, err := w.exec(`UPDATE cluster_settings_iv SET valid_to = ? WHERE rowid = ?`, w.ts, cs.settingsRow); err != nil {
 			return err
 		}
-		if err := w.event(evClusterSettingsChanged, sevMinor, "cluster", cs.id, "", cs.lastTs, 0,
+		if err := w.event(evClusterSettingsChanged, sevMinor, "cluster", cs.id, "", cs.lastSettingsTs, 0,
 			map[string]any{"changes": diffMaps(cs.settingsMap, flat)}); err != nil {
 			return err
 		}
@@ -737,11 +748,11 @@ func (w *writer) remotes(rs []esclient.Remote) error {
 			if !v.connected {
 				typ, sev = evRemoteDisconnected, sevMajor
 			}
-			if err := w.event(typ, sev, "remote", r.Alias, "", cs.lastTs, 0, map[string]any{"mode": r.Mode}); err != nil {
+			if err := w.event(typ, sev, "remote", r.Alias, "", cs.lastRemotesTs, 0, map[string]any{"mode": r.Mode}); err != nil {
 				return err
 			}
-		} else if old == nil && !r.Connected && cs.lastTs > 0 {
-			if err := w.event(evRemoteDisconnected, sevMajor, "remote", r.Alias, "", cs.lastTs, 0, map[string]any{"mode": r.Mode}); err != nil {
+		} else if old == nil && !r.Connected && cs.lastRemotesTs > 0 {
+			if err := w.event(evRemoteDisconnected, sevMajor, "remote", r.Alias, "", cs.lastRemotesTs, 0, map[string]any{"mode": r.Mode}); err != nil {
 				return err
 			}
 		}
@@ -847,6 +858,29 @@ func (in *Ingester) Forget(cluster string) {
 	in.mu.Lock()
 	delete(in.clusters, cluster)
 	in.mu.Unlock()
+}
+
+// Purge deletes the partitions of a cluster (Store.Purge), runs remove if
+// not nil (the application drops the spooled records there) and forgets
+// the mirror, holding the lock of the cluster throughout: an ingestion runs
+// wholly before or after, never in between with the purged mirror.
+func (in *Ingester) Purge(ctx context.Context, cluster string, remove func() error) (int, error) {
+	l := in.clusterLock(cluster)
+	l.Lock()
+	defer l.Unlock()
+	defer func() { // even after a failure: what is left is reloaded
+		in.mu.Lock()
+		delete(in.clusters, cluster)
+		in.mu.Unlock()
+	}()
+	n, err := in.st.Purge(ctx, cluster)
+	if err != nil {
+		return n, err
+	}
+	if remove != nil {
+		err = remove()
+	}
+	return n, err
 }
 
 // duplicateNames reports the node names carried by several ES nodes at once

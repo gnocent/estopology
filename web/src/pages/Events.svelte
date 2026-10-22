@@ -11,7 +11,7 @@
   import { abWindow } from '../lib/window.svelte';
 
   let { cluster }: { cluster: string } = $props();
-  const win = $derived(abWindow());
+  const win = abWindow();
   const q = $derived(router.query);
   const filters = $derived({
     types: q.get('types') ?? '',
@@ -30,7 +30,11 @@
     api.meta().then((m) => (meta = m), () => {});
   });
 
+  // Only the answer to the latest request is kept.
+  let seq = 0;
   async function load(more = false) {
+    const n = ++seq;
+    if (!more) cursor = {};
     try {
       const r = await api.events(cluster, {
         from: win.a,
@@ -40,11 +44,12 @@
         before_ts: more ? cursor.ts : undefined,
         before_key: more ? cursor.key : undefined,
       });
+      if (n !== seq) return;
       events = more ? [...events, ...r.events] : r.events;
       cursor = { ts: r.next_ts, key: r.next_key };
       error = '';
     } catch (e) {
-      error = (e as Error).message;
+      if (n === seq) error = (e as Error).message;
     }
   }
 
@@ -74,7 +79,7 @@
       ><span class="muted">{t('events.severity')}</span> <Info text={t('events.sevHelp')} />
       <select value={filters.severity} onchange={(e) => router.set({ severity: (e.target as HTMLSelectElement).value || null })}>
         <option value="">{t('events.allSeverities')}</option>
-        {#each [1, 2, 3] as s (s)}<option value={s}>≤ {tk(`severity.${s}`)}</option>{/each}
+        {#each [1, 2, 3] as s (s)}<option value={String(s)}>≤ {tk(`severity.${s}`)}</option>{/each}
       </select>
     </label>
     {#each ['node', 'machine', 'family'] as f (f)}

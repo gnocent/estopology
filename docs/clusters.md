@@ -351,8 +351,8 @@ The ▼ button details each call to Elasticsearch of the last reading: name, HTT
 
 Statuses of a reading:
 
-- `ok`: everything was read;
-- `partial`: a call failed. The metrics obtained are kept, but nothing is concluded about the structure: no node, index or shard is declared gone;
+- `ok`: everything was read. A full capture also stays `ok` when only a side call failed (`_nodes/stats`, `_cat/allocation`, `_cluster/settings`, `_remote/info`, `_all/_settings`): the structure is kept, the missing information is unknown rather than empty (nothing is closed for it), and the error is shown;
+- `partial`: a call failed (for a full capture: `_nodes`, `_cat/indices` or `_cat/shards`). The metrics obtained are kept, but nothing is concluded about the structure: no node, index or shard is declared gone;
 - `failed`: the cluster did not answer `GET /` or `_cluster/health`. The period shows as "unknown" in the interface.
 
 **A cluster that is saved but absent from this page** could not start its collection, most often because a secret or CA file cannot be read. The save succeeds all the same; the error is in the journal of the service (`journalctl -u estopo | grep "apply configuration"`). "Test the connection" gives the same error directly.

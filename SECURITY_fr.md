@@ -2,7 +2,7 @@
 
 # Sécurité
 
-Ce document décrit, en termes simples, ce qu'ES.Topo protège et comment, ce qu'il faut régler avant de l'exposer, ses limites connues, et la façon de signaler une vulnérabilité. ES.Topo est en version bêta (0.8.0-beta) et n'a fait l'objet d'aucun audit de sécurité externe.
+Ce document décrit, en termes simples, ce qu'ES.Topo protège et comment, ce qu'il faut régler avant de l'exposer, ses limites connues, et la façon de signaler une vulnérabilité. ES.Topo est en version bêta (0.8.1-beta) et n'a fait l'objet d'aucun audit de sécurité externe.
 
 ## Modèle de sécurité
 
@@ -35,8 +35,8 @@ Le dossier de données contient la topologie de vos clusters au fil du temps : n
 - **Authentification sur transport sûr seulement.** Les modes « Comptes locaux » et « LDAP » sont refusés en HTTP clair sur une écoute non locale, au démarrage comme au changement de mode.
 - **Refus en cas de doute.** Si les réglages d'authentification ou les sessions ne peuvent pas être lus, les requêtes sont refusées (réponse 503) et le démarrage échoue : ES.Topo ne se comporte jamais comme si l'authentification était désactivée.
 - **Protection contre les requêtes d'un autre site.** Toute requête de modification doit venir de la même origine que l'interface, porter un corps JSON ou un en-tête propre à l'interface, et, quand l'authentification est activée, un jeton anti-CSRF lié à la session. Sinon elle est refusée (réponse 403).
-- **Sessions.** Cookie inaccessible aux scripts, limité au même site, `Secure` en HTTPS ; expiration après inactivité (12 heures par défaut) et durée maximale de 7 jours ; fermeture des autres sessions au changement de mot de passe, de rôle, ou à la désactivation du compte.
-- **Mots de passe.** 12 caractères au moins, empreinte argon2id. Les tentatives de connexion sont limitées par utilisateur et par adresse.
+- **Sessions.** Cookie inaccessible aux scripts, limité au même site, `Secure` en HTTPS ; expiration après inactivité (12 heures par défaut) et durée maximale de 7 jours ; fermeture des autres sessions au changement de mot de passe, de rôle, ou à la désactivation du compte, et de toutes les sessions au changement de mode d'authentification ; la standby ferme les siennes de la même façon.
+- **Mots de passe.** 12 caractères au moins, empreinte argon2id. Les tentatives de connexion sont limitées par utilisateur et par adresse ; une connexion réussie ne remet pas à zéro le compteur de l'adresse.
 - **Secrets en fichiers.** Les mots de passe, clés d'API, clés privées et le jeton de réplication ne sont jamais saisis dans l'interface ni stockés dans la base : seul leur chemin l'est.
 - **En-têtes du navigateur.** Politique de sécurité de contenu stricte (aucune ressource externe, pas d'inclusion dans une autre page), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, et `Strict-Transport-Security` quand ES.Topo sert HTTPS.
 - **Aucun appel sortant** autre que vers vos clusters, votre annuaire et l'autre instance de la paire : pas de télémétrie, pas de vérification de mise à jour, aucune ressource chargée depuis Internet par l'interface.

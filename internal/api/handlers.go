@@ -344,7 +344,11 @@ func (s *Server) handleNode(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	points, _ := intParam(r, "points", 500, 10, 5000)
+	points, err := intParam(r, "points", 500, 10, 5000)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	h, err := s.engine.NodeHistory(ctx, cluster, name, from, to, points)
 	if err != nil {
 		s.fail(w, r, err)
@@ -545,12 +549,12 @@ func (s *Server) handlePath(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	segs, err := s.engine.Path(r.Context(), r.PathValue("id"), pq)
+	res, err := s.engine.Path(r.Context(), r.PathValue("id"), pq)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, segs)
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleLosses(w http.ResponseWriter, r *http.Request) {

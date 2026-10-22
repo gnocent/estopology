@@ -34,6 +34,7 @@ type DiffSummary struct {
 	ShardsMoved     int `json:"shards_moved"`
 	ShardsLost      int `json:"shards_lost"`
 	ShardsNew       int `json:"shards_new"`
+	ShardsPromoted  int `json:"shards_promoted"`  // replicas become primary on their node
 	SettingsChanged int `json:"settings_changed"` // index settings
 	ClusterSettings int `json:"cluster_settings_changed"`
 	RemotesChanged  int `json:"remotes_changed"`
@@ -71,7 +72,7 @@ type ShardDiff struct {
 	Family  string   `json:"family"`
 	Shard   int      `json:"shard"`
 	Primary bool     `json:"primary"`
-	Change  string   `json:"change"` // moved, lost, new
+	Change  string   `json:"change"` // moved, lost, new, promoted (replica become primary on its node: From = To)
 	From    []string `json:"from"`
 	To      []string `json:"to"`
 }
@@ -88,6 +89,9 @@ func nodeKeyOf(n *model.Node) nodeKey { return nodeKey{n.Name, n.ESID} }
 // Diff compares the states at a and b.
 func (e *Engine) Diff(ctx context.Context, cluster string, a, b int64) (*Diff, error) {
 	sa, err := e.StateAt(ctx, cluster, a)
+	if err == nil && sa.CaptureMs == 0 {
+		err = ErrNoData // only light probes before A: no structure to compare
+	}
 	if err == ErrNoData { // A before the history: start from the first full capture
 		first, ferr := e.firstFullCapture(ctx, cluster)
 		if ferr != nil {
@@ -104,6 +108,9 @@ func (e *Engine) Diff(ctx context.Context, cluster string, a, b int64) (*Diff, e
 	sb, err := e.StateAt(ctx, cluster, b)
 	if err != nil {
 		return nil, err
+	}
+	if sb.CaptureMs == 0 {
+		return nil, ErrNoData
 	}
 	return Compare(sa, sb), nil
 }
@@ -160,21 +167,24 @@ func Compare(sa, sb *model.State) *Diff {
 	}
 	sort.Slice(d.Indices, func(i, j int) bool { return d.Indices[i].Name+d.Indices[i].UUID < d.Indices[j].Name+d.Indices[j].UUID })
 
-	// Shard copies of indices present at both dates: compare node sets.
+	// Shard copies of indices present at both dates: compare the copies of
+	// each shard node by node first, so that a replica promoted on its node
+	// is not read as a primary moved there plus a replica lost.
 	type sk struct {
-		uuid    string
-		shard   int32
-		primary bool
+		uuid  string
+		shard int32
 	}
-	place := func(s *model.State) map[sk][]string {
-		m := map[sk][]string{}
+	place := func(s *model.State) map[sk]map[string]bool { // node -> primary
+		m := map[sk]map[string]bool{}
 		for _, sh := range s.Shards {
 			if sh.Node < 0 {
 				continue
 			}
-			k := sk{s.Indices[sh.Index].UUID, sh.Shard, sh.Primary}
-			n := &s.Nodes[sh.Node]
-			m[k] = append(m[k], n.Name)
+			k := sk{s.Indices[sh.Index].UUID, sh.Shard}
+			if m[k] == nil {
+				m[k] = map[string]bool{}
+			}
+			m[k][s.Nodes[sh.Node].Name] = sh.Primary
 		}
 		return m
 	}
@@ -192,26 +202,56 @@ func Compare(sa, sb *model.State) *Diff {
 		if !inA || !inB {
 			continue // index added or removed: listed with the indices
 		}
-		from, to := setDiff(pa[k], pb[k]), setDiff(pb[k], pa[k])
-		if len(from) == 0 && len(to) == 0 {
-			continue
+		var promoted []string
+		from, to := map[bool][]string{}, map[bool][]string{} // by primary
+		for n, p := range pa[k] {
+			switch q, ok := pb[k][n]; {
+			case ok && q == p:
+			case ok && !p && q:
+				promoted = append(promoted, n)
+			default:
+				from[p] = append(from[p], n)
+			}
 		}
-		base := ShardDiff{UUID: k.uuid, Index: x.Name, Family: x.Family, Shard: int(k.shard), Primary: k.primary}
-		moved := min(len(from), len(to))
-		if moved > 0 {
+		for n, q := range pb[k] {
+			if p, ok := pa[k][n]; !ok || (p && !q) {
+				to[q] = append(to[q], n)
+			}
+		}
+		sort.Strings(promoted)
+		sort.Strings(from[true])
+		// A promotion takes over the primary role: the primary of A gone from
+		// its node is the replica to rebuild.
+		for range promoted {
+			if len(from[true]) > 0 {
+				from[false], from[true] = append(from[false], from[true][0]), from[true][1:]
+			}
+		}
+		base := ShardDiff{UUID: k.uuid, Index: x.Name, Family: x.Family, Shard: int(k.shard)}
+		for _, n := range promoted {
 			s := base
-			s.Change, s.From, s.To = "moved", from[:moved], to[:moved]
+			s.Primary, s.Change, s.From, s.To = true, "promoted", []string{n}, []string{n}
 			d.Shards = append(d.Shards, s)
 		}
-		if len(from) > moved {
-			s := base
-			s.Change, s.From = "lost", from[moved:]
-			d.Shards = append(d.Shards, s)
-		}
-		if len(to) > moved {
-			s := base
-			s.Change, s.To = "new", to[moved:]
-			d.Shards = append(d.Shards, s)
+		for _, primary := range []bool{true, false} {
+			gone, came := setDiff(from[primary], to[primary]), setDiff(to[primary], from[primary])
+			base.Primary = primary
+			moved := min(len(gone), len(came))
+			if moved > 0 {
+				s := base
+				s.Change, s.From, s.To = "moved", gone[:moved], came[:moved]
+				d.Shards = append(d.Shards, s)
+			}
+			if len(gone) > moved {
+				s := base
+				s.Change, s.From = "lost", gone[moved:]
+				d.Shards = append(d.Shards, s)
+			}
+			if len(came) > moved {
+				s := base
+				s.Change, s.To = "new", came[moved:]
+				d.Shards = append(d.Shards, s)
+			}
 		}
 	}
 	sort.Slice(d.Shards, func(i, j int) bool {
@@ -274,6 +314,8 @@ func Compare(sa, sb *model.State) *Diff {
 			d.Summary.ShardsMoved += n
 		case "lost":
 			d.Summary.ShardsLost += n
+		case "promoted":
+			d.Summary.ShardsPromoted += n
 		default:
 			d.Summary.ShardsNew += n
 		}
@@ -334,7 +376,14 @@ func mapDiff(a, b map[string]string) []SettingDiff {
 	return out
 }
 
+// nodeChanges compares the descriptions of a node. A node seen by a probe
+// after the last full capture has none yet (no node_info): nothing to
+// compare, it is not a change.
 func nodeChanges(a, b *model.Node) []SettingDiff {
+	described := func(n *model.Node) bool { return n.Version != "" || len(n.Roles) > 0 || n.Machine != "" }
+	if !described(a) || !described(b) {
+		return nil
+	}
 	m := func(n *model.Node) map[string]string {
 		x := map[string]string{"version": n.Version, "os": n.OS, "kernel": n.Kernel, "jvm": n.JVM,
 			"roles": strings.Join(n.Roles, ","), "machine": n.Machine, "ip": n.IP}

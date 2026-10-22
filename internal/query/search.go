@@ -24,7 +24,8 @@ type Hit struct {
 type catalogue struct {
 	built  time.Time
 	lastTs int64
-	items  []Hit // sorted by lower-cased value
+	gen    uint64 // engine generation it was built with
+	items  []Hit  // sorted by lower-cased value
 	lower  []string
 }
 
@@ -87,7 +88,8 @@ func (e *Engine) catalogue(ctx context.Context, cluster string) (*catalogue, err
 	}
 	si.mu.Lock()
 	defer si.mu.Unlock()
-	if c := si.byCl[cluster]; c != nil && (c.lastTs == last || time.Since(c.built) < catalogueTTL) {
+	gen := e.Generation() // family rules changed: rebuild
+	if c := si.byCl[cluster]; c != nil && c.gen == gen && (c.lastTs == last || time.Since(c.built) < catalogueTTL) {
 		return c, nil
 	}
 	parts, err := e.partitions(ctx, cluster, 0, 1<<62)
@@ -125,13 +127,13 @@ func (e *Engine) catalogue(ctx context.Context, cluster string) (*catalogue, err
 			r.Scan(&uuid, &name, &family)
 			add(Hit{Cluster: cluster, Kind: "index", Value: name, Label: uuid})
 			add(Hit{Cluster: cluster, Kind: "uuid", Value: uuid, Label: name})
-			add(Hit{Cluster: cluster, Kind: "family", Value: family})
+			add(Hit{Cluster: cluster, Kind: "family", Value: e.familyOf(cluster, name, family)})
 			return nil
 		}); err != nil {
 			return nil, err
 		}
 	}
-	c := &catalogue{built: time.Now(), lastTs: last}
+	c := &catalogue{built: time.Now(), lastTs: last, gen: gen}
 	for h := range seen {
 		c.items = append(c.items, h)
 	}

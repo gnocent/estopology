@@ -1,14 +1,13 @@
 <script lang="ts">
   // A/B window of the analysis screens, kept in the URL (?a=&b=).
   import { router } from '../lib/router.svelte';
+  import { abWindow, clock } from '../lib/window.svelte';
   import { t } from '../lib/i18n';
   import Info from './Info.svelte';
 
   let { defaultHours = 1 }: { defaultHours?: number } = $props();
 
-  const now = Date.now();
-  const b = $derived(router.num('b') ?? now);
-  const a = $derived(router.num('a') ?? b - defaultHours * 3_600_000);
+  const win = abWindow(() => defaultHours);
 
   function local(ms: number): string {
     return new Date(ms - new Date(ms).getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
@@ -18,10 +17,12 @@
     return Number.isFinite(d) ? d : null;
   }
   function preset(hours: number) {
-    router.set({ a: hours === defaultHours ? null : now - hours * 3_600_000, b: null });
+    // A fresh "now", the end of the window: a is always before b.
+    clock.refresh();
+    router.set({ a: hours === defaultHours ? null : clock.now - hours * 3_600_000, b: null });
   }
   // The preset in use, when the period ends now.
-  const current = $derived(router.num('b') === undefined ? Math.round((b - a) / 3_600_000) : 0);
+  const current = $derived(router.num('b') === undefined ? Math.round((win.b - win.a) / 3_600_000) : 0);
   const presets = [1, 6, 24, 24 * 7];
 </script>
 
@@ -29,11 +30,11 @@
   <strong>{t('win.period')}</strong>
   <label class="row">
     <span class="muted">{t('win.a')}</span>
-    <input type="datetime-local" value={local(a)} onchange={(e) => router.set({ a: parse((e.target as HTMLInputElement).value) })} />
+    <input type="datetime-local" value={local(win.a)} onchange={(e) => router.set({ a: parse((e.target as HTMLInputElement).value) })} />
   </label>
   <label class="row">
     <span class="muted">{t('win.b')}</span>
-    <input type="datetime-local" value={local(b)} onchange={(e) => router.set({ b: parse((e.target as HTMLInputElement).value) })} />
+    <input type="datetime-local" value={local(win.b)} onchange={(e) => router.set({ b: parse((e.target as HTMLInputElement).value) })} />
   </label>
   {#each presets as h (h)}
     <button aria-pressed={current === h} onclick={() => preset(h)}>{h === 1 ? t('win.lastHour') : h < 48 ? t('win.last', { h }) : t('win.days', { d: h / 24 })}</button>

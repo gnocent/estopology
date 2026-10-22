@@ -17,7 +17,14 @@
     days = 7,
   }: { cluster: string; at: number | undefined; onchange: (at: number | undefined) => void; days?: number } = $props();
 
-  const now = Date.now();
+  // Now, taken again when T changes and at each action (to the minute: the
+  // timeline is not fetched again for nothing).
+  let bump = $state(0);
+  const now = $derived.by(() => {
+    void at;
+    void bump;
+    return Math.floor(Date.now() / 60_000) * 60_000;
+  });
   const cursor = $derived(at ?? now);
   // Window: `days` days ending one day after T (never after now).
   const to = $derived(Math.min(now, cursor + 86_400_000));
@@ -42,8 +49,15 @@
     return Math.round(from + f * (to - from));
   }
 
+  // A date at or after now (give or take `slack`) is "now".
+  function commit(d: number | undefined, slack = 0) {
+    bump++;
+    onchange(d === undefined || d >= Date.now() - slack ? undefined : d);
+  }
+
   function down(e: PointerEvent) {
     el.setPointerCapture(e.pointerId);
+    bump++;
     drag = dateAt(e.clientX);
   }
   function move(e: PointerEvent) {
@@ -53,12 +67,11 @@
     if (drag === null) return;
     const d = drag;
     drag = null;
-    onchange(d >= now - 60_000 ? undefined : d);
+    commit(d, 60_000);
   }
 
   function step(ms: number) {
-    const d = cursor + ms;
-    onchange(d >= now ? undefined : d);
+    commit((at ?? Date.now()) + ms);
   }
 
   const ticks = $derived(Array.from({ length: days + 1 }, (_, i) => from + i * 86_400_000));
@@ -67,7 +80,7 @@
     const v = (e.target as HTMLInputElement).value;
     if (!v) return;
     const d = new Date(v).getTime();
-    if (Number.isFinite(d)) onchange(d >= now ? undefined : d);
+    if (Number.isFinite(d)) commit(d);
   }
 
   function localValue(ms: number): string {
@@ -86,7 +99,7 @@
     <button onclick={() => step(300_000)} use:tip={t('band.fwd5m')}>5 min ›</button>
     <button onclick={() => step(3_600_000)} use:tip={t('band.fwd1h')}>1 h »</button>
     <input type="datetime-local" value={localValue(cursor)} onchange={input} aria-label="date" />
-    <button onclick={() => onchange(undefined)} aria-pressed={at === undefined}>{t('common.now')}</button>
+    <button onclick={() => commit(undefined)} aria-pressed={at === undefined}>{t('common.now')}</button>
   </div>
   <div
     class="track"

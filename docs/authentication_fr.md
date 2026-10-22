@@ -89,7 +89,7 @@ Tant que l'authentification est activée, ES.Topo refuse de supprimer, de désac
 - **Inactivité** : « Expiration des sessions inactives (heures) », 12 par défaut, de 1 à 720. L'échéance est repoussée au fil de l'usage, mais seulement quand il reste moins de la moitié du délai : en pratique, une session inactive expire entre la moitié du délai et le délai entier.
 - **Durée maximale** : une session expire au plus tard **7 jours** après la connexion, même si elle est utilisée sans arrêt. Cette durée ne se règle pas.
 - « Se déconnecter » ferme la session.
-- Les sessions d'un compte de l'annuaire tombent si l'on quitte le mode « LDAP ».
+- Changer de mode d'authentification ferme toutes les sessions ouvertes, sauf celle de l'administrateur local qui fait le changement (quand le nouveau mode n'est pas « Aucune »).
 - La langue et le thème choisis sont enregistrés avec le compte et le suivent d'un navigateur à l'autre.
 
 ## Limitation des tentatives de connexion
@@ -130,8 +130,9 @@ Choisissez le mode « LDAP » : la carte « Annuaire LDAP » apparaît.
 | « Fichier du mot de passe du compte de service » | Chemin du fichier qui contient ce mot de passe. Il est relu à chaque connexion : pas de redémarrage après une rotation. | obligatoire |
 | « Base de recherche des utilisateurs » | Branche où chercher les personnes (sous-arbre entier). | obligatoire |
 | « Filtre utilisateur ({user} = identifiant saisi) » | Filtre de recherche ; `{user}` est remplacé par le nom saisi, protégé contre l'injection. | `(&(objectClass=inetOrgPerson)(uid={user}))` |
+| « Attribut du nom de compte (lu dans l'entrée trouvée) » | Attribut de l'entrée trouvée qui nomme le compte dans ES.Topo ; il doit avoir une seule valeur. Avec un filtre qui accepte l'identifiant ou l'adresse, `(\|(uid={user})(mail={user}))`, se connecter avec l'une ou l'autre ouvre le même compte. Pour Active Directory : `sAMAccountName`. | `uid` |
 | « Base de recherche des groupes » | Branche où chercher les groupes. | obligatoire |
-| « Filtre de groupe ({dn} = DN de l'utilisateur, {user} = identifiant) » | Filtre qui trouve les groupes d'une personne. | groupes `groupOfNames` (attribut `member`), `groupOfUniqueNames` (`uniqueMember`) et `posixGroup` (`memberUid`) |
+| « Filtre de groupe ({dn} = DN de l'utilisateur, {user} = nom de compte) » | Filtre qui trouve les groupes d'une personne. | groupes `groupOfNames` (attribut `member`), `groupOfUniqueNames` (`uniqueMember`) et `posixGroup` (`memberUid`) |
 | « Groupes administrateurs (DN, un par ligne) » | Appartenir à l'un d'eux donne le rôle admin. | au moins un groupe, admin ou lecteur |
 | « Groupes lecteurs (DN, un par ligne) » | Appartenir à l'un d'eux donne le rôle lecteur. | |
 
@@ -171,6 +172,7 @@ dc=example,dc=org
    | Fichier du mot de passe du compte de service | `/etc/estopo/secrets/ldap-bind-password` |
    | Base de recherche des utilisateurs | `ou=people,dc=example,dc=org` |
    | Filtre utilisateur | *(vide : filtre par défaut)* |
+   | Attribut du nom de compte | *(vide : `uid`)* |
    | Base de recherche des groupes | `ou=groups,dc=example,dc=org` |
    | Filtre de groupe | *(vide : filtre par défaut)* |
    | Groupes administrateurs | `cn=estopo-admins,ou=groups,dc=example,dc=org` |

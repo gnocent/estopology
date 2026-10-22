@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -16,7 +17,7 @@ import (
 func (w *writer) saveMarkers() error {
 	for k, v := range map[string]int64{
 		"last_ts": w.ts, "last_presence_ts": w.cs.lastPresenceTs, "last_full_ts": w.cs.lastFullTs,
-		"last_health_ts": w.cs.lastHealthTs,
+		"last_health_ts": w.cs.lastHealthTs, "last_settings_ts": w.cs.lastSettingsTs, "last_remotes_ts": w.cs.lastRemotesTs,
 	} {
 		if _, err := w.exec(`INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)`, k, strconv.FormatInt(v, 10)); err != nil {
 			return err
@@ -27,7 +28,9 @@ func (w *writer) saveMarkers() error {
 
 // keyframe copies every open interval, the last metric values and the
 // referenced blobs into the new partition, so that it can be read alone
-// (SPEC §6.4). Intervals keep their original start.
+// (SPEC §6.4). Intervals keep their original start. The last closed info of
+// a node absent from the last full capture is copied too, so that the
+// mirror rebuilt from this partition alone (load) is the one in memory.
 func (w *writer) keyframe(old *Partition) error {
 	cs := w.cs
 	if _, err := w.exec(`INSERT INTO capture(ts, end_ts, kind, trigger, status, duration_ms) VALUES (?,?,'keyframe','week_start','ok',0)`,
@@ -39,6 +42,9 @@ func (w *writer) keyframe(old *Partition) error {
 	for _, ns := range cs.nodes {
 		if ns.info != nil {
 			hashes[ns.info.attrs] = true
+		}
+		if ns.prevInfo != nil {
+			hashes[ns.prevInfo.attrs] = true
 		}
 	}
 	for _, is := range cs.indices {
@@ -96,6 +102,16 @@ func (w *writer) keyframe(old *Partition) error {
 			if ns.infoRow, err = w.insert(`INSERT INTO node_info(node_id, valid_from, roles, ip, transport, http_addr, host, machine,
 				es_version, os_name, os_kernel, os_arch, processors, jvm_version, start_ms, attrs_blob) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				id, ns.infoSince, v.roles, v.ip, v.transport, v.http, v.host, v.machine, v.version, v.osName, v.kernel, v.arch,
+				v.processors, v.jvm, v.startMs, v.attrs); err != nil {
+				return err
+			}
+		} else if v := ns.prevInfo; v != nil {
+			// A node absent from the last full capture: its last info, closed (it
+			// is not in the state of the week), is what it is compared with when
+			// it comes back (node_upgraded), also after a restart.
+			if _, err = w.exec(`INSERT INTO node_info(node_id, valid_from, valid_to, roles, ip, transport, http_addr, host, machine,
+				es_version, os_name, os_kernel, os_arch, processors, jvm_version, start_ms, attrs_blob) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				id, ns.prevSince, ns.prevTo, v.roles, v.ip, v.transport, v.http, v.host, v.machine, v.version, v.osName, v.kernel, v.arch,
 				v.processors, v.jvm, v.startMs, v.attrs); err != nil {
 				return err
 			}
@@ -245,6 +261,9 @@ func (in *Ingester) pruneNodes(ctx context.Context, cs *cstate, next *Partition)
 			continue
 		}
 		p, err := in.st.OpenExisting(ctx, info)
+		if errors.Is(err, ErrNoPartition) {
+			continue // deleted: what it held no longer counts
+		}
 		if err != nil {
 			return
 		}
@@ -292,6 +311,9 @@ func (in *Ingester) load(ctx context.Context, id string) (*cstate, error) {
 	var p *Partition
 	for i := len(parts) - 1; i >= 0 && p == nil; i-- {
 		c, err := in.st.OpenExisting(ctx, parts[i])
+		if errors.Is(err, ErrNoPartition) {
+			continue // deleted since listed, or its file is gone
+		}
 		if err != nil {
 			return nil, fmt.Errorf("open partition %s of %s: %w", parts[i].Week, id, err)
 		}
@@ -332,7 +354,9 @@ func (in *Ingester) load(ctx context.Context, id string) (*cstate, error) {
 		return rows.Err()
 	}
 
-	// Markers.
+	// Markers. Partitions written before the per-section markers existed
+	// fall back to the last record, as these windows then did.
+	cs.lastSettingsTs, cs.lastRemotesTs = -1, -1
 	if err := q(`SELECT key, value FROM meta WHERE key LIKE 'last_%' OR key = 'cluster_defaults'`, func(r *sql.Rows) error {
 		var k, v string
 		if err := r.Scan(&k, &v); err != nil {
@@ -348,12 +372,22 @@ func (in *Ingester) load(ctx context.Context, id string) (*cstate, error) {
 			cs.lastFullTs = n
 		case "last_health_ts":
 			cs.lastHealthTs = n
+		case "last_settings_ts":
+			cs.lastSettingsTs = n
+		case "last_remotes_ts":
+			cs.lastRemotesTs = n
 		case "cluster_defaults":
 			cs.defaultsHash = v
 		}
 		return nil
 	}); err != nil {
 		return nil, err
+	}
+	if cs.lastSettingsTs < 0 {
+		cs.lastSettingsTs = cs.lastTs
+	}
+	if cs.lastRemotesTs < 0 {
+		cs.lastRemotesTs = cs.lastTs
 	}
 	if cs.lastHealthTs > 0 {
 		h := esclient.Health{UnassignedPrimary: esclient.Missing}
@@ -414,16 +448,16 @@ func (in *Ingester) load(ctx context.Context, id string) (*cstate, error) {
 	}
 	// Nodes absent at the last full capture: their last closed info, to detect
 	// what changed when they come back.
-	if err := q(`SELECT node_id, roles, ip, transport, http_addr, host, machine, es_version, os_name, os_kernel,
+	if err := q(`SELECT node_id, valid_from, valid_to, roles, ip, transport, http_addr, host, machine, es_version, os_name, os_kernel,
 		os_arch, processors, jvm_version, start_ms, attrs_blob FROM node_info WHERE valid_to IS NOT NULL ORDER BY valid_to`, func(r *sql.Rows) error {
-		var nid int64
+		var nid, from, to int64
 		var v nodeInfoVals
-		if err := r.Scan(&nid, &v.roles, &v.ip, &v.transport, &v.http, &v.host, &v.machine, &v.version, &v.osName,
+		if err := r.Scan(&nid, &from, &to, &v.roles, &v.ip, &v.transport, &v.http, &v.host, &v.machine, &v.version, &v.osName,
 			&v.kernel, &v.arch, &v.processors, &v.jvm, &v.startMs, &v.attrs); err != nil {
 			return err
 		}
 		if ns := cs.nodeBy[nid]; ns != nil && ns.info == nil {
-			ns.prevInfo = &v // the latest closed one wins
+			ns.prevInfo, ns.prevSince, ns.prevTo = &v, from, to // the latest closed one wins
 		}
 		return nil
 	}); err != nil {

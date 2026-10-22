@@ -2,7 +2,7 @@
 
 # Security
 
-This document describes, in plain words, what ES.Topo protects and how, what to set before exposing it, its known limits, and how to report a vulnerability. ES.Topo is a beta version (0.8.0-beta) and has not undergone any external security audit.
+This document describes, in plain words, what ES.Topo protects and how, what to set before exposing it, its known limits, and how to report a vulnerability. ES.Topo is a beta version (0.8.1-beta) and has not undergone any external security audit.
 
 ## Security model
 
@@ -35,8 +35,8 @@ The data directory holds the topology of your clusters over time: names and addr
 - **Authentication over a safe transport only.** The "Local accounts" and "LDAP" modes are refused over plain HTTP on a non-local listener, at start-up as well as when the mode changes.
 - **Refusal when in doubt.** If the authentication settings or the sessions cannot be read, requests are refused (503 answer) and the start fails: ES.Topo never behaves as if authentication were disabled.
 - **Protection against requests from another site.** Every state-changing request must come from the same origin as the interface, carry a JSON body or a header specific to the interface, and, when authentication is enabled, an anti-CSRF token bound to the session. Otherwise it is refused (403 answer).
-- **Sessions.** Cookie not accessible to scripts, limited to the same site, `Secure` over HTTPS; expiry after inactivity (12 hours by default) and maximum lifetime of 7 days; the other sessions are closed on a password change, a role change, or when the account is disabled.
-- **Passwords.** At least 12 characters, argon2id hash. Sign-in attempts are throttled per user and per address.
+- **Sessions.** Cookie not accessible to scripts, limited to the same site, `Secure` over HTTPS; expiry after inactivity (12 hours by default) and maximum lifetime of 7 days; the other sessions are closed on a password change, a role change, or when the account is disabled, and every session on a change of the authentication mode; the standby closes its own the same way.
+- **Passwords.** At least 12 characters, argon2id hash. Sign-in attempts are throttled per user and per address; a successful sign-in does not reset the count of the address.
 - **Secrets as files.** Passwords, API keys, private keys and the replication token are never typed into the interface nor stored in the database: only their path is.
 - **Browser headers.** Strict content security policy (no external resource, no embedding in another page), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `Strict-Transport-Security` when ES.Topo serves HTTPS.
 - **No outbound call** other than to your clusters, your directory and the other instance of the pair: no telemetry, no update check, no resource loaded from the Internet by the interface.

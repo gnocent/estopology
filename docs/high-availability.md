@@ -97,10 +97,10 @@ Every 30 seconds, the standby:
 1. checks that the primary is indeed the instance it follows (see [Replication blocked](#replication-blocked));
 2. copies the configuration if it changed: clusters, settings (retention, whitelist, authentication and LDAP, default CA…), family rules, accounts, acknowledgements, audit trail;
 3. for each cluster, fetches the readings it does not have yet and ingests them exactly as the primary does;
-4. copies the complete history files of a cluster when it has nothing for it, or when it is more than 72 hours behind (the time during which the primary keeps the raw readings);
-5. deletes the history of a cluster that the primary purged.
+4. copies the complete history files of a cluster when it has nothing for it, or when it is more than 72 hours behind (the time during which the primary keeps the raw readings), or behind a primary that no longer holds the raw readings of that cluster (for example a cluster disabled while the standby was stopped);
+5. deletes the history of a cluster that the primary purged, with its raw readings.
 
-**Not** replicated, because they describe the instance itself: the sessions (you sign in separately on each instance), the alerts, the role and the high-availability state. The secret files and the environment variables are not replicated either.
+**Not** replicated, because they describe the instance itself: the sessions (you sign in separately on each instance; the standby closes its own when a password, a role or the authentication mode changes on the primary, or when an account is disabled or deleted there), the alerts, the role and the high-availability state. The secret files and the environment variables are not replicated either.
 
 A standby (like a fenced old primary) refuses every change: clusters, accounts, settings, connection test, LDAP test, password change. The message is `this instance is standby: changes are made on the primary`. Only the high-availability actions, signing in and signing out remain possible.
 
@@ -120,7 +120,7 @@ On a standby, "Replication" section:
 | Item | Meaning |
 |---|---|
 | "Last synchronisation" | Last cycle completed without error. |
-| "Lag" | Gap between the newest reading on the primary and the newest ingested here (the worst cluster). |
+| "Lag" | Gap between the newest reading on the primary (raw or already in its history) and the newest ingested here (the worst cluster). |
 | "Copying partitions…" | A rebuild is in progress. |
 | "Last error" | Error of the last cycle, with its date. |
 | "Replication blocked: …" | See [Replication blocked](#replication-blocked). |
@@ -156,11 +156,11 @@ At start-up, then every 30 seconds, a primary queries the instance it watches. I
 - shows the banner "Collection suspended: a standby has been promoted since. Demote this instance (Administration › High availability).";
 - refuses every change.
 
-To make it a standby again: on this old primary, **Administration › High availability**, check the "URL of the new primary" (by default, the watched instance), click "Demote to standby" and confirm. The instance then copies the **whole** history of the new primary. The readings it alone held are lost.
+To make it a standby again: on this old primary, **Administration › High availability**, check the "URL of the new primary" (by default, the watched instance), click "Demote to standby" and confirm. The instance then copies the **whole** history of the new primary. The readings it alone held are lost. If it restarts before the copy is done, the copy is done after the restart.
 
 ### Rebuild
 
-"Rebuild", on a standby, copies the whole history again from the primary. Use it when the standby looks inconsistent, or to get out of a block (next section).
+"Rebuild", on a standby, copies the whole history again from the primary. Use it when the standby looks inconsistent, or to get out of a block (next section). The request survives a restart of the standby until the copy has succeeded.
 
 The standby first downloads all the files of a cluster, verifies them, then replaces its own: during the operation, up to **twice** the disk space of that cluster is needed. On the primary side, each file is first copied into the `tmp` subdirectory of the data directory before being sent: allow room for one extra weekly file. The page shows "Copying partitions…".
 
@@ -186,6 +186,8 @@ You see it:
 - in **Administration › High availability** of the standby: box "Replication blocked:" followed by the reason, and "Nothing is imported or deleted while the block lasts. …";
 - in the journal of the standby: `replication stopped until an administrator rebuilds this standby`;
 - through the metric `estopo_replication_blocked`, which is 1.
+
+The block stays while the primary does not answer: only a primary that passes the check lifts it.
 
 To get out of it, decide which instance holds the right history:
 

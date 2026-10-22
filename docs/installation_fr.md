@@ -4,7 +4,7 @@
 
 Ce guide mène d'un téléchargement à un service qui tourne en HTTPS avec un compte administrateur. Il se suit de haut en bas. Les commandes sont pour Linux ; une section à la fin traite de Windows et de macOS.
 
-ES.Topo est en version bêta (0.8.0-beta) : installez-le d'abord sur une machine de test.
+ES.Topo est en version bêta (0.8.1-beta) : installez-le d'abord sur une machine de test.
 
 Guides liés : [déclarer un cluster](clusters_fr.md), [authentification](authentication_fr.md), [haute disponibilité](high-availability_fr.md), [exploitation](operations_fr.md), [sécurité](../SECURITY_fr.md).
 
@@ -40,7 +40,7 @@ Guides liés : [déclarer un cluster](clusters_fr.md), [authentification](authen
    ./estopo-linux-amd64 version
    ```
 
-   Résultat attendu : une ligne qui commence par `estopo 0.8.0-beta`.
+   Résultat attendu : une ligne qui commence par `estopo 0.8.1-beta`.
 
 Les binaires ne sont pas signés : la somme de contrôle prouve seulement que le fichier est celui qui a été publié.
 
@@ -57,7 +57,7 @@ Sans réglage, ES.Topo :
 - écoute sur `127.0.0.1:8080`, en HTTP, joignable depuis cette machine seulement ;
 - crée un dossier `data` à côté du binaire ;
 - n'a pas d'authentification : tout visiteur est administrateur ;
-- écrit ses journaux sur la sortie standard. La première ligne ressemble à `level=INFO msg=starting version=0.8.0-beta listen=127.0.0.1:8080 data_dir=… tls=false secrets_dir=""`.
+- écrit ses journaux sur la sortie standard. La première ligne ressemble à `level=INFO msg=starting version=0.8.1-beta listen=127.0.0.1:8080 data_dir=… tls=false secrets_dir=""`.
 
 Ouvrez `http://127.0.0.1:8080` dans un navigateur de la même machine. Pour arrêter, tapez Ctrl+C.
 
@@ -164,7 +164,7 @@ HTTPS est nécessaire dès que le service est joignable depuis une autre machine
    curl https://estopo.example.org:8443/healthz
    ```
 
-   Résultat attendu : `{"status":"ok","version":"0.8.0-beta","role":"primary","uptime":"…"}`. Si `curl` refuse le certificat, ajoutez `--cacert` suivi du fichier de votre CA. Ouvrez aussi le port dans le pare-feu de la machine si nécessaire.
+   Résultat attendu : `{"status":"ok","version":"0.8.1-beta","role":"primary","uptime":"…"}`. Si `curl` refuse le certificat, ajoutez `--cacert` suivi du fichier de votre CA. Ouvrez aussi le port dans le pare-feu de la machine si nécessaire.
 
 À savoir :
 
@@ -266,7 +266,7 @@ Ouvrez ensuite `http://127.0.0.1:8080`. Ctrl+C arrête le programme.
 
 - Au démarrage, ES.Topo met à jour lui-même la structure de ses bases de données quand la nouvelle version le demande. Cette opération ne se fait que vers l'avant : **revenir à une version plus ancienne n'est pas prévu**. Pour revenir en arrière, restaurez la sauvegarde.
 - En haute disponibilité, les deux instances doivent tourner avec la même version : voir [Haute disponibilité](high-availability_fr.md#mettre-à-jour-les-deux-instances).
-- 0.8.0-beta est la première version publiée : aucune mise à jour depuis une version antérieure n'a encore été éprouvée.
+- La mise à jour de 0.8.1-beta vers 0.8.1-beta a été éprouvée sur un dossier de données simulé. Lisez d'abord les notes de mise à jour du [journal des versions](../CHANGELOG_fr.md#mise-à-jour-depuis-080-beta) (mode LDAP).
 
 ## Désinstaller
 

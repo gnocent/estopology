@@ -73,6 +73,7 @@
     'sum.shards_moved': 'flows',
     'sum.shards_lost': 'losses',
     'sum.shards_new': 'shard',
+    'sum.shards_promoted': 'up',
     'sum.settings_changed': 'sliders',
     'sum.cluster_settings_changed': 'sliders',
     'sum.remotes_changed': 'globe',
@@ -82,6 +83,7 @@
     'losses.promoted': 'up',
     'losses.reallocated': 'check',
     'losses.still_unassigned': 'question',
+    'losses.deleted': 'index',
   };
 </script>
 

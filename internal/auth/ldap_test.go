@@ -209,3 +209,78 @@ func TestServiceLDAPLogin(t *testing.T) {
 }
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// The account is named by the user attribute of the entry found, not by
+// the typed name: with a filter on uid or mail, the mail of alice reaches
+// the account alice (and its disabling), never a second account.
+func TestLDAPIdentityFromEntry(t *testing.T) {
+	ctx := context.Background()
+	srv := ldaptest.Start(t)
+	svc, st := newTestService(t)
+	c := ldapConfig(srv)
+	c.UserFilter = "(|(uid={user})(mail={user}))"
+	if err := st.SetSetting(ctx, "auth", Config{Mode: ModeLDAP, LDAP: &c}); err != nil {
+		t.Fatal(err)
+	}
+	login := func(name, pw string) (User, error) {
+		return svc.Login(ctx, httptest.NewRecorder(), loginFrom("10.0.0.1"), name, pw)
+	}
+	if u, err := login("Alice@example.org", ldaptest.AlicePassword); err != nil || u.Name != "alice" {
+		t.Fatalf("login by mail: %+v %v", u, err)
+	}
+	st.SaveUser(ctx, store.User{Name: "alice", Role: RoleAdmin, Source: "ldap", Disabled: true})
+	if u, err := login("alice@example.org", ldaptest.AlicePassword); !errors.Is(err, ErrInvalid) {
+		t.Errorf("disabled account reached by its mail: %+v %v", u, err)
+	}
+	users, _ := st.Users(ctx)
+	for _, u := range users {
+		if u.Name != "alice" {
+			t.Errorf("second account %+v", u)
+		}
+	}
+	// The posixGroup membership is looked up with the account name too.
+	if u, err := login("dave@example.org", ldaptest.DavePassword); err != nil || u.Name != "dave" || u.Role != RoleReader {
+		t.Errorf("dave by mail: %+v %v", u, err)
+	}
+	// A local account is never reached through the directory, whatever
+	// the typed name.
+	h, _ := HashPassword("local-admin-password")
+	st.SaveUser(ctx, store.User{Name: "bob", Role: RoleAdmin, Source: "local", Password: h})
+	if u, err := login("bob@example.org", ldaptest.BobPassword); !errors.Is(err, ErrInvalid) {
+		t.Errorf("local account reached by the mail of the directory: %+v %v", u, err)
+	}
+	// An entry without the attribute is refused.
+	c.UserAttr = "employeeNumber"
+	st.SetSetting(ctx, "auth", Config{Mode: ModeLDAP, LDAP: &c})
+	if u, err := login("carol", ldaptest.CarolPassword); !errors.Is(err, ErrInvalid) {
+		t.Errorf("entry without the user attribute: %+v %v", u, err)
+	}
+	c.UserAttr = "uid)(x"
+	if err := c.Validate(); err == nil {
+		t.Error("invalid user attribute accepted")
+	}
+}
+
+// In LDAP mode a name without a local account costs a password hash, like
+// a local account: the response time does not tell which local accounts
+// exist.
+func TestLDAPLoginCostsAHash(t *testing.T) {
+	ctx := context.Background()
+	srv := ldaptest.Start(t)
+	svc, st := newTestService(t)
+	c := ldapConfig(srv)
+	st.SetSetting(ctx, "auth", Config{Mode: ModeLDAP, LDAP: &c})
+	for i := 0; i < cap(argonSlots); i++ {
+		argonSlots <- struct{}{}
+	}
+	defer func() {
+		for len(argonSlots) > 0 {
+			<-argonSlots
+		}
+	}()
+	wait, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if _, err := svc.Login(wait, httptest.NewRecorder(), loginFrom("10.0.0.1"), "alice", ldaptest.AlicePassword); !errors.Is(err, ErrBusy) {
+		t.Errorf("directory login without a hash: %v", err)
+	}
+}

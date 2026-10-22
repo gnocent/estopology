@@ -19,6 +19,7 @@
   }: { cluster: string; uuid?: string; family?: string; shard?: number; from: number; to: number; maxLanes?: number } = $props();
 
   let segs = $state<Segment[] | null>(null);
+  let truncated = $state(false);
   let error = $state('');
   let details = $state(false);
 
@@ -26,7 +27,7 @@
     const ctrl = new AbortController();
     segs = null;
     api2.path(cluster, { uuid, family, shard, a: from, b: to }, ctrl.signal).then(
-      (s) => ((segs = s ?? []), (error = '')),
+      (r) => ((segs = r.segments ?? []), (truncated = !!r.truncated), (error = '')),
       (e) => (e as Error).name !== 'AbortError' && (error = (e as Error).message),
     );
     return () => ctrl.abort();
@@ -100,6 +101,7 @@
 {:else if !segs}<p class="muted loading">{t('common.loading')}</p>
 {:else if segs.length === 0}<p class="muted">{t('path.none')}</p>
 {:else}
+  {#if truncated}<div class="banner warn">{t('path.truncated')}</div>{/if}
   <div class="legend">
     {#each nodeNames.slice(0, 12) as n (n)}<span><span class="sw" style:background={nodeColor(n)}></span>{n}</span>{/each}
     {#if nodeNames.length > 12}<span>{t('path.moreNodes', { n: nodeNames.length - 12 })}</span>{/if}

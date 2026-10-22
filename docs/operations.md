@@ -44,7 +44,7 @@ How it works:
 - Retention runs at start-up, then once an hour.
 - It deletes **whole weeks**: a weekly file is only deleted when its entire week is outside the retention period. The history that can be viewed is therefore a little longer than the configured duration.
 - When the maximum size is exceeded, the oldest weekly files, all clusters together, are deleted until the directory is back under the cap. The size counted is that of the whole directory (`meta.db`, `spool` and `tmp` included), but only history files are deleted.
-- The file of the current week is never deleted. If the cap is still exceeded in spite of everything, an alert is shown on the same page.
+- The latest file of each cluster is never deleted (the current week, or the previous one until the first reading of the new week). If the cap is still exceeded in spite of everything, an alert is shown on the same page.
 - The history of a cluster removed from the configuration is kept until its retention.
 - The audit trail is kept one year; the raw readings of the `spool`, 72 hours.
 
@@ -82,7 +82,7 @@ A standby instance is not a backup: it also reproduces deletions. The effect of 
 `GET /healthz` always answers without authentication, with code 200 as soon as the service is up:
 
 ```json
-{"status":"ok","version":"0.8.0-beta","role":"primary","uptime":"3h12m5s","clusters":4,"suspended":1,"stale":1}
+{"status":"ok","version":"0.8.1-beta","role":"primary","uptime":"3h12m5s","clusters":4,"suspended":1,"stale":1}
 ```
 
 | Field | Meaning |
@@ -111,6 +111,7 @@ To enable it: **Administration › System**, "Prometheus metrics", tick "Expose 
 | `estopo_uptime_seconds` | | time since start-up |
 | `estopo_ha_role` | `role` | equals 1 for the current role (`primary`, `standby`, `fenced`) |
 | `estopo_cluster_suspended` | `cluster` | 1 when the collection of the cluster is suspended (identity changed) |
+| `estopo_history_ahead_seconds` | `cluster` | how far the last reading ingested is ahead of the clock of the instance, 0 within an hour: the clock went back, and new readings are refused until it catches up |
 | `estopo_probe_last_timestamp_seconds` | `cluster` | start of the last light probe |
 | `estopo_probe_last_duration_seconds` | `cluster` | duration of the last light probe |
 | `estopo_probe_last_ok` | `cluster` | 1 if the last probe fully succeeded |
@@ -154,6 +155,7 @@ Suggested alerts:
 | `time() - estopo_probe_last_timestamp_seconds > 900` | the collection of a cluster has stopped |
 | `estopo_cluster_suspended == 1` | a cluster changed identity: a decision is needed (see [Declaring a cluster](clusters.md#cluster-suspended-after-an-identity-change)) |
 | `increase(estopo_ingest_skipped_total[1h]) > 0` | readings were lost |
+| `estopo_history_ahead_seconds > 0` | the clock of the instance went back: new readings are refused until it catches up; check the clock of the server (NTP) |
 | `estopo_replication_blocked == 1` | the standby stopped replicating: see [High availability](high-availability.md#replication-blocked) |
 | `estopo_replication_lag_seconds > 900` | the standby is falling behind |
 

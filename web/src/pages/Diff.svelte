@@ -14,7 +14,7 @@
 
   let { cluster }: { cluster: string } = $props();
 
-  const win = $derived(abWindow());
+  const win = abWindow();
   const tab = $derived(router.query.get('tab') ?? 'path');
 
   let d = $state<DiffResponse | null>(null);
@@ -33,31 +33,51 @@
   });
 
   const pathTypes = 'shard_relocated,shard_lost,shard_promoted,shard_assigned,shard_unassigned,node_left,node_joined,machine_lost';
+  // Only the answer to the latest request is kept.
+  let pathSeq = 0;
+  let pathError = $state('');
   async function loadPath(more = false) {
-    const r = await api.events(cluster, {
-      from: win.a,
-      to: win.b,
-      types: pathTypes,
-      limit: 300,
-      before_ts: more ? cursor.ts : undefined,
-      before_key: more ? cursor.key : undefined,
-    });
-    path = more ? [...path, ...r.events] : r.events;
-    cursor = { ts: r.next_ts, key: r.next_key };
+    const n = ++pathSeq;
+    if (!more) cursor = {};
+    try {
+      const r = await api.events(cluster, {
+        from: win.a,
+        to: win.b,
+        types: pathTypes,
+        limit: 300,
+        before_ts: more ? cursor.ts : undefined,
+        before_key: more ? cursor.key : undefined,
+      });
+      if (n !== pathSeq) return;
+      path = more ? [...path, ...r.events] : r.events;
+      cursor = { ts: r.next_ts, key: r.next_key };
+      pathError = '';
+    } catch (e) {
+      if (n === pathSeq) pathError = (e as Error).message;
+    }
   }
   $effect(() => {
     if (tab === 'path') loadPath();
   });
 
-  // Extra pages of a truncated section.
+  // Extra pages of a truncated section, dropped when the window changes.
   let extra = $state<Record<string, unknown[]>>({});
+  let extraSeq = 0;
   async function more(section: string, loaded: number) {
-    const p = await api2.diffSection<unknown>(cluster, win.a, win.b, section, loaded, 500);
-    extra = { ...extra, [section]: [...(extra[section] ?? []), ...p.items] };
+    const n = extraSeq;
+    try {
+      const p = await api2.diffSection<unknown>(cluster, win.a, win.b, section, loaded, 500);
+      if (n !== extraSeq) return;
+      extra = { ...extra, [section]: [...(extra[section] ?? []), ...p.items] };
+    } catch (e) {
+      if (n === extraSeq) error = (e as Error).message;
+    }
   }
   $effect(() => {
+    void cluster;
     void win.a;
     void win.b;
+    extraSeq++;
     extra = {};
   });
 
@@ -68,6 +88,7 @@
     nodes_added: 'green',
     indices_added: 'green',
     shards_new: 'green',
+    shards_promoted: 'blue',
     nodes_removed: 'red',
     shards_lost: 'red',
     indices_removed: 'orange',
@@ -128,6 +149,7 @@
   <div class="card">
     <p class="muted tabhelp">{tk(`diff.help.${tab}`)}</p>
     {#if tab === 'path'}
+      {#if pathError}<div class="banner warn">{t('common.error', { msg: pathError })}</div>{/if}
       <EventTable {cluster} events={path} />
       {#if cursor.ts}<button class="more" onclick={() => loadPath(true)}>{t('events.more')}</button>{/if}
     {:else if tab === 'nodes'}
@@ -264,7 +286,8 @@
     border-color: var(--red);
   }
   .ch-moved,
-  .ch-changed {
+  .ch-changed,
+  .ch-promoted {
     border-color: var(--blue);
   }
 </style>

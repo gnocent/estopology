@@ -139,10 +139,15 @@ func (e *Engine) events(ctx context.Context, cluster string, f EventFilter) (*Ev
 		if f.Family != "" {
 			// The subject of an index event is its uuid, of a shard event
 			// "uuid/shard": the part before the slash is looked up among the
-			// indices of the family (one term whatever their number).
-			conds = append(conds, `(group_ref = ? OR substr(subject_ref, 1, instr(subject_ref || '/', '/') - 1)
-				IN (SELECT uuid FROM idx WHERE family = ?))`)
-			args = append(args, f.Family, f.Family)
+			// indices of the family under the rules in force (one term
+			// whatever their number). The stored group_ref of index events is
+			// the automatic family, it is not used.
+			uuids, err := e.familyUUIDs(ctx, cluster, p, f.Family)
+			if err != nil {
+				return nil, err
+			}
+			conds = append(conds, `substr(subject_ref, 1, instr(subject_ref || '/', '/') - 1) IN (SELECT value FROM json_each(?))`)
+			args = append(args, uuids)
 		}
 		q := `SELECT id, coalesce(ts_lo, 0), ts_hi, coalesce(exact_ts, 0), type, severity, subject_kind, subject_ref,
 			coalesce(group_ref, ''), coalesce(payload, '') FROM event WHERE ` + strings.Join(conds, " AND ") +
@@ -157,6 +162,13 @@ func (e *Engine) events(ctx context.Context, cluster string, f EventFilter) (*Ev
 			}
 			if payload != "" {
 				ev.Payload = json.RawMessage(payload)
+			}
+			if ev.Kind == "index" && ev.Group != "" {
+				// Stored at ingestion with the automatic family.
+				var x struct{ Name string }
+				if json.Unmarshal(ev.Payload, &x) == nil && x.Name != "" {
+					ev.Group = e.familyOf(cluster, x.Name, ev.Group)
+				}
 			}
 			key := p.info.Week + "#" + leftPad(id)
 			all = append(all, keyed{ev, key})

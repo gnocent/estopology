@@ -44,7 +44,7 @@ Fonctionnement :
 - La rétention passe au démarrage, puis une fois par heure.
 - Elle supprime des **semaines entières** : un fichier hebdomadaire n'est supprimé que lorsque toute sa semaine est sortie de la durée de rétention. L'historique consultable dépasse donc un peu la durée réglée.
 - Quand la taille maximale est dépassée, les fichiers hebdomadaires les plus anciens, tous clusters confondus, sont supprimés jusqu'à repasser sous le plafond. La taille comptée est celle de tout le dossier (`meta.db`, `spool` et `tmp` compris), mais seuls les fichiers d'historique sont supprimés.
-- Le fichier de la semaine en cours n'est jamais supprimé. Si le plafond reste dépassé malgré tout, une alerte s'affiche sur la même page.
+- Le dernier fichier de chaque cluster n'est jamais supprimé (celui de la semaine en cours, ou de la précédente jusqu'au premier relevé de la nouvelle semaine). Si le plafond reste dépassé malgré tout, une alerte s'affiche sur la même page.
 - L'historique d'un cluster retiré de la configuration est conservé jusqu'à sa rétention.
 - Le journal d'audit est gardé un an ; les relevés bruts du `spool`, 72 heures.
 
@@ -82,7 +82,7 @@ Une instance standby n'est pas une sauvegarde : elle reproduit aussi les suppres
 `GET /healthz` répond toujours sans authentification, avec le code 200 dès que le service est en marche :
 
 ```json
-{"status":"ok","version":"0.8.0-beta","role":"primary","uptime":"3h12m5s","clusters":4,"suspended":1,"stale":1}
+{"status":"ok","version":"0.8.1-beta","role":"primary","uptime":"3h12m5s","clusters":4,"suspended":1,"stale":1}
 ```
 
 | Champ | Signification |
@@ -111,6 +111,7 @@ Pour l'activer : **Administration › Système**, « Métriques Prometheus », c
 | `estopo_uptime_seconds` | | durée depuis le démarrage |
 | `estopo_ha_role` | `role` | vaut 1 pour le rôle actuel (`primary`, `standby`, `fenced`) |
 | `estopo_cluster_suspended` | `cluster` | 1 quand la collecte du cluster est suspendue (identité changée) |
+| `estopo_history_ahead_seconds` | `cluster` | avance du dernier relevé ingéré sur l'horloge de l'instance, 0 en deçà d'une heure : l'horloge a reculé, et les nouveaux relevés sont refusés jusqu'à ce qu'elle le rattrape |
 | `estopo_probe_last_timestamp_seconds` | `cluster` | début de la dernière sonde légère |
 | `estopo_probe_last_duration_seconds` | `cluster` | durée de la dernière sonde légère |
 | `estopo_probe_last_ok` | `cluster` | 1 si la dernière sonde a réussi entièrement |
@@ -154,6 +155,7 @@ Alertes suggérées :
 | `time() - estopo_probe_last_timestamp_seconds > 900` | la collecte d'un cluster est arrêtée |
 | `estopo_cluster_suspended == 1` | un cluster a changé d'identité : décision à prendre (voir [Déclarer un cluster](clusters_fr.md#cluster-suspendu-après-un-changement-didentité)) |
 | `increase(estopo_ingest_skipped_total[1h]) > 0` | des relevés ont été perdus |
+| `estopo_history_ahead_seconds > 0` | l'horloge de l'instance a reculé : les nouveaux relevés sont refusés jusqu'à ce qu'elle rattrape l'historique ; vérifier l'horloge du serveur (NTP) |
 | `estopo_replication_blocked == 1` | la standby a cessé de répliquer : voir [Haute disponibilité](high-availability_fr.md#réplication-bloquée) |
 | `estopo_replication_lag_seconds > 900` | la standby prend du retard |
 

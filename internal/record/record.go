@@ -55,7 +55,9 @@ type IndexSettings struct {
 	Settings map[string]string `json:"settings"`
 }
 
-// Record is one probe or full capture. Missing sections are nil.
+// Record is one probe or full capture. Missing sections are nil; an empty
+// list (no remote, no index left) is not a missing section and survives the
+// encoding (omitzero keeps [] and omits nil).
 type Record struct {
 	Format  int    `json:"format"`
 	Cluster string `json:"cluster"` // configuration id of the cluster
@@ -70,19 +72,19 @@ type Record struct {
 
 	Root            *esclient.Root            `json:"root,omitempty"`
 	Health          *esclient.Health          `json:"health,omitempty"`
-	NodesStats      []esclient.NodeStats      `json:"nodes_stats,omitempty"`
-	Allocation      []esclient.Allocation     `json:"allocation,omitempty"`
+	NodesStats      []esclient.NodeStats      `json:"nodes_stats,omitzero"`
+	Allocation      []esclient.Allocation     `json:"allocation,omitzero"`
 	ClusterSettings *esclient.ClusterSettings `json:"cluster_settings,omitempty"`
-	Remotes         []esclient.Remote         `json:"remotes,omitempty"`
+	Remotes         []esclient.Remote         `json:"remotes,omitzero"`
 	// RemotesUnavailable: _remote/info refused (e.g. coordinating node without
 	// the remote_cluster_client role); not a capture failure.
 	RemotesUnavailable bool `json:"remotes_unavailable,omitempty"`
 
 	// Full captures only.
-	Nodes         []esclient.NodeInfo `json:"nodes,omitempty"`
-	Indices       []esclient.CatIndex `json:"indices,omitempty"`
-	IndexSettings []IndexSettings     `json:"index_settings,omitempty"`
-	Shards        []esclient.CatShard `json:"shards,omitempty"`
+	Nodes         []esclient.NodeInfo `json:"nodes,omitzero"`
+	Indices       []esclient.CatIndex `json:"indices,omitzero"`
+	IndexSettings []IndexSettings     `json:"index_settings,omitzero"`
+	Shards        []esclient.CatShard `json:"shards,omitzero"`
 }
 
 // HasStructure reports whether the record describes indices and shards
@@ -226,10 +228,10 @@ func encodeStreaming(w *bufio.Writer, r *Record) error {
 	return err
 }
 
-// writeArray writes `,"name":[...]`, like the omitempty field would be
-// (nothing for a nil slice, [] for an empty one is also omitted).
+// writeArray writes `,"name":[...]`, like the omitzero field would be
+// (nothing for a nil slice, [] for an empty one).
 func writeArray[T any](w *bufio.Writer, name string, items []T) error {
-	if len(items) == 0 {
+	if items == nil {
 		return nil
 	}
 	w.WriteString(`,"` + name + `":[`)

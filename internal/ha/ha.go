@@ -94,7 +94,7 @@ type ReplicationStatus struct {
 type ClusterRepl struct {
 	Cluster   string `json:"cluster"`
 	CursorMs  int64  `json:"cursor_ms"`  // newest record ingested here
-	PrimaryMs int64  `json:"primary_ms"` // newest record in the primary's spool
+	PrimaryMs int64  `json:"primary_ms"` // newest record on the primary (spooled or ingested)
 	Records   int    `json:"records"`    // records received since start
 	Rebuilds  int    `json:"rebuilds"`   // partition copies since start
 }
@@ -133,7 +133,8 @@ type Manager struct {
 	peer       PeerCheck
 	repls      map[string]*ClusterRepl
 	cursors    map[string]int64
-	rebuild    bool
+	rebuild    bool   // copy every cluster again at the next synchronisation (ha_state rebuild_pending)
+	rebuildGen uint64 // counts the rebuild requests: one made during a rebuild outlives it
 	metaETag   string
 	configHash string // of the configuration tables last applied
 	// A promotion cancels the synchronisation in progress: it must not wait
@@ -179,6 +180,7 @@ func New(ctx context.Context, o Options) (*Manager, error) {
 	m.st = State{Role: kv["role"], StandbyOf: kv["standby_of"], Peer: kv["peer"], FencedReason: kv["fenced_reason"]}
 	m.st.PromotedMs, _ = strconv.ParseInt(kv["promoted_ms"], 10, 64)
 	m.instanceID, m.primaryID = kv["instance_id"], kv["primary_id"]
+	m.rebuild = kv["rebuild_pending"] != ""
 	if m.instanceID == "" {
 		b := make([]byte, 16)
 		if _, err := rand.Read(b); err != nil {
@@ -192,7 +194,7 @@ func New(ctx context.Context, o Options) (*Manager, error) {
 	switch {
 	case m.st.Role == "" && o.StandbyOf != "":
 		st := State{Role: RoleStandby, StandbyOf: strings.TrimRight(o.StandbyOf, "/")}
-		if err := m.persist(ctx, st, ""); err != nil {
+		if err := m.persist(ctx, st, true); err != nil {
 			return nil, err
 		}
 		m.st, m.rebuild = st, true
@@ -232,16 +234,23 @@ func checkURL(raw string, allowInsecure bool) error {
 	return fmt.Errorf("%s: the scheme must be https", raw)
 }
 
-// persist writes a state, with the id of the primary followed, to meta.db.
-// The state in memory changes only once this has succeeded: memory and disk
-// must not disagree on the role.
-func (m *Manager) persist(ctx context.Context, st State, primaryID string) error {
-	promoted := ""
+// persist writes a state to meta.db. The id of the primary followed is
+// forgotten (recorded again at the next synchronisation); rebuild records,
+// in the same write, that the history must be copied again from the primary
+// before anything else: a restart in between must neither lose the request
+// nor follow the new primary with the history of the old role. The state in
+// memory changes only once this has succeeded: memory and disk must not
+// disagree on the role.
+func (m *Manager) persist(ctx context.Context, st State, rebuild bool) error {
+	promoted, pending := "", ""
 	if st.PromotedMs > 0 {
 		promoted = strconv.FormatInt(st.PromotedMs, 10)
 	}
+	if rebuild {
+		pending = "1"
+	}
 	return m.o.Store.SetHAState(ctx, map[string]string{"role": st.Role, "standby_of": st.StandbyOf, "peer": st.Peer,
-		"promoted_ms": promoted, "fenced_reason": st.FencedReason, "primary_id": primaryID})
+		"promoted_ms": promoted, "fenced_reason": st.FencedReason, "primary_id": "", "rebuild_pending": pending})
 }
 
 // Role returns the current role.
@@ -348,7 +357,7 @@ func (m *Manager) Promote(ctx context.Context, actor string) error {
 		m.o.Log.Warn("promotion while records received from the primary are still being ingested", "err", err)
 	}
 	st := State{Role: RolePrimary, Peer: old, PromotedMs: m.o.Clock.Now().UnixMilli()}
-	if err := m.persist(ctx, st, ""); err != nil {
+	if err := m.persist(ctx, st, false); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -382,7 +391,7 @@ func (m *Manager) Demote(ctx context.Context, actor, primaryURL string) error {
 		return err
 	}
 	st := State{Role: RoleStandby, StandbyOf: primaryURL}
-	if err := m.persist(ctx, st, ""); err != nil {
+	if err := m.persist(ctx, st, true); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -404,11 +413,15 @@ func (m *Manager) Demote(ctx context.Context, actor, primaryURL string) error {
 func (m *Manager) Rebuild(ctx context.Context, actor string) error {
 	m.mu.Lock()
 	st := m.st
+	if st.Role == RoleStandby {
+		// Before persist: a rebuild ending now must not clear the request.
+		m.rebuildGen++
+	}
 	m.mu.Unlock()
 	if st.Role != RoleStandby {
 		return fmt.Errorf("%w: only a standby is rebuilt", ErrRole)
 	}
-	if err := m.persist(ctx, st, ""); err != nil {
+	if err := m.persist(ctx, st, true); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -434,7 +447,7 @@ func (m *Manager) SetPeer(ctx context.Context, actor, peer string) error {
 	}
 	st := m.st
 	st.Peer = peer
-	err := m.persist(ctx, st, "")
+	err := m.persist(ctx, st, false)
 	if err == nil {
 		m.st, m.peer = st, PeerCheck{}
 	}
@@ -463,7 +476,7 @@ func (m *Manager) Resume(ctx context.Context, actor string) error {
 		}
 	}
 	st.Role, st.FencedReason = RolePrimary, ""
-	if err := m.persist(ctx, st, ""); err != nil {
+	if err := m.persist(ctx, st, false); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -502,7 +515,7 @@ func (m *Manager) CheckPeer(ctx context.Context) {
 	// recent primary is the worse outcome, and the next start checks again.
 	m.st.Role = RoleFenced
 	m.st.FencedReason = fmt.Sprintf("%s was promoted at %s", st.Peer, time.UnixMilli(ps.PromotedMs).UTC().Format(time.RFC3339))
-	err = m.persist(ctx, m.st, "")
+	err = m.persist(ctx, m.st, false)
 	reason := m.st.FencedReason
 	m.mu.Unlock()
 	if err != nil {

@@ -351,8 +351,8 @@ Le bouton ▼ détaille chaque appel à Elasticsearch du dernier relevé : nom, 
 
 Statuts d'un relevé :
 
-- `ok` : tout a été lu ;
-- `partial` : un appel a échoué. Les métriques obtenues sont gardées, mais rien n'est conclu sur la structure : aucun nœud, index ou shard n'est déclaré disparu ;
+- `ok` : tout a été lu. Une capture complète reste aussi `ok` quand seul un appel annexe a échoué (`_nodes/stats`, `_cat/allocation`, `_cluster/settings`, `_remote/info`, `_all/_settings`) : la structure est gardée, l'information manquante est inconnue et non vide (rien n'est fermé pour elle), et l'erreur est affichée ;
+- `partial` : un appel a échoué (pour une capture complète : `_nodes`, `_cat/indices` ou `_cat/shards`). Les métriques obtenues sont gardées, mais rien n'est conclu sur la structure : aucun nœud, index ou shard n'est déclaré disparu ;
 - `failed` : le cluster n'a pas répondu à `GET /` ou à `_cluster/health`. La période apparaît comme « inconnue » dans l'interface.
 
 **Un cluster enregistré mais absent de cette page** n'a pas pu démarrer sa collecte, le plus souvent parce qu'un fichier de secret ou de CA est illisible. L'enregistrement réussit quand même ; l'erreur est dans le journal du service (`journalctl -u estopo | grep "apply configuration"`). « Tester la connexion » donne la même erreur directement.

@@ -26,6 +26,7 @@
 
   let sv = $state<StateView | null>(null);
   let detail = $state<GroupDetail | null>(null);
+  let detailError = $state('');
   let events = $state<EsEvent[]>([]);
   let error = $state('');
 
@@ -48,7 +49,11 @@
     const ctrl = new AbortController();
     const to = at ?? Date.now();
     detail = null;
-    api.group(cluster, labels, at, ctrl.signal).then((d) => (detail = d), () => {});
+    detailError = '';
+    api.group(cluster, labels, at, ctrl.signal).then(
+      (d) => (detail = d),
+      (e) => (e as Error).name !== 'AbortError' && (detailError = (e as Error).message),
+    );
     api.groupEvents(cluster, labels, to - week, to, 100, ctrl.signal).then((p) => (events = p.events ?? []), () => (events = []));
     return () => ctrl.abort();
   });
@@ -236,7 +241,8 @@
   <div class="two">
     <section class="card">
       <h2><Icon name="shard" /> {t('group.content')} <Info text={t('group.contentHelp')} /></h2>
-      {#if !detail}<p class="muted loading">{t('common.loading')}</p>
+      {#if detailError}<div class="banner warn">{t('common.error', { msg: detailError })}</div>
+      {:else if !detail}<p class="muted loading">{t('common.loading')}</p>
       {:else if detail.families.length === 0}<p class="muted">{t('common.none')}</p>
       {:else}
         <input class="famfilter" type="search" bind:value={famFilter} placeholder={t('content.filter', { n: detail.families.length })} />

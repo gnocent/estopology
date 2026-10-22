@@ -49,12 +49,19 @@ type App struct {
 	engine    *query.Engine
 	api       *api.Server
 
+	syncMu  sync.Mutex        // serializes SyncClusters
+	running map[string]string // cluster id -> hash of its collector configuration (syncMu)
+
 	mu       sync.Mutex
-	running  map[string]string              // cluster id -> hash of its collector configuration
 	machines map[string]string              // cluster id -> machine attribute
 	families map[string][]derive.FamilyRule // cluster id -> family rules
 	auth     *auth.Service
 	ha       *ha.Manager
+
+	// The replication and the retention loop, which Close stops and waits
+	// for before closing the store.
+	cancel context.CancelFunc
+	loops  sync.WaitGroup
 }
 
 // Options for New.
@@ -131,7 +138,7 @@ func New(ctx context.Context, o Options) (*App, error) {
 		st.Close()
 		return nil, err
 	}
-	opts := api.Options{Log: o.Log, Clock: o.Clock, Store: st, Engine: a.engine, UI: o.UI, OnConfigChange: a.SyncClusters,
+	opts := api.Options{Log: o.Log, Clock: o.Clock, Store: st, Engine: a.engine, UI: o.UI, OnConfigChange: a.SyncClusters, Purge: a.purge,
 		Auth: a.auth, Transport: api.Transport{TLS: o.TLS, LoopbackOnly: o.LoopbackOnly, AllowInsecureAuth: o.AllowInsecureAuth},
 		SecretsDir: o.SecretsDir,
 		HA:         a.ha, ExtraMetrics: a.metrics}
@@ -141,7 +148,7 @@ func New(ctx context.Context, o Options) (*App, error) {
 		if cs.Parallelism < 1 {
 			cs.Parallelism = 3
 		}
-		a.collector = collector.New(o.Clock, o.Log, a.pipeline, a, cs.Parallelism)
+		a.collector = collector.New(o.Clock, o.Log, collectorSink{a.pipeline}, a, cs.Parallelism)
 		opts.Collector = a.collector
 	}
 	a.api = api.New(opts)
@@ -158,8 +165,9 @@ func (a *App) Handler() http.Handler { return a.api }
 func (a *App) Store() *store.Store { return a.store }
 
 // Start replays the spool, starts the ingestion, the collector and the
-// retention loop. They stop with ctx.
+// retention loop. They stop with ctx, or with Close.
 func (a *App) Start(ctx context.Context) error {
+	ctx, a.cancel = context.WithCancel(ctx)
 	// Partition copies a previous run left unfinished (HA).
 	if err := a.store.CleanTmp(); err != nil {
 		return err
@@ -175,14 +183,29 @@ func (a *App) Start(ctx context.Context) error {
 	if err := a.SyncClusters(ctx); err != nil { // also loads machine attributes and family rules
 		return err
 	}
-	go a.retentionLoop(ctx)
-	go a.ha.Run(ctx)
+	a.loops.Add(2)
+	go func() {
+		defer a.loops.Done()
+		a.retentionLoop(ctx)
+	}()
+	go func() {
+		defer a.loops.Done()
+		a.ha.Run(ctx)
+	}()
 	return nil
 }
 
 // Close stops the collector and closes the store.
 func (a *App) Close() error {
-	// The pipeline first: a worker handing over its last record must not wait
+	// The replication and the retention first: they use the store, and a
+	// partition copy must not be cut by its closing. Waited for before the
+	// collector stops, a configuration the replication applies (Hooks.Changed)
+	// cannot start a worker after it.
+	if a.cancel != nil {
+		a.cancel()
+	}
+	a.loops.Wait()
+	// Then the pipeline: a worker handing over its last record must not wait
 	// for an ingestion that has stopped (the record is in the spool).
 	a.pipeline.close()
 	if a.collector != nil {
@@ -190,6 +213,26 @@ func (a *App) Close() error {
 	}
 	a.pipeline.wait()
 	return a.store.Close()
+}
+
+// purge deletes the whole history of a cluster (admin action, SPEC §6.6):
+// its partitions and its spooled records. Left in the spool, these would be
+// replayed at the next start (the history would come back) and would keep
+// announcing the cluster to the standby, which would not purge it (SPEC §11).
+// The ingestion of the cluster waits meanwhile. A record being spooled at
+// that very moment (pipeline.send) may still survive the purge. A cluster
+// still collected starts over with a full capture.
+func (a *App) purge(ctx context.Context, cluster string) (int, error) {
+	n, err := a.ingester.Purge(ctx, cluster, func() error {
+		if !record.ValidCluster(cluster) { // it names a directory; no other has a spool
+			return nil
+		}
+		return os.RemoveAll(filepath.Join(a.spool.Dir(), cluster))
+	})
+	if err == nil && a.collector != nil {
+		a.collector.Reset(cluster) // ErrUnknownCluster: not collected
+	}
+	return n, err
 }
 
 // familyOf applies the family rules of a cluster (SPEC §7.3).
@@ -210,8 +253,12 @@ func (a *App) machineAttr(cluster string) string {
 }
 
 // SyncClusters starts, restarts or stops collector workers to match the
-// configuration in meta.db.
+// configuration in meta.db. Calls run one at a time, reading included, so
+// that an older configuration is never applied last. a.mu is not held while
+// workers stop: a stopping worker may wait for the ingestion, which takes it.
 func (a *App) SyncClusters(ctx context.Context) error {
+	a.syncMu.Lock()
+	defer a.syncMu.Unlock()
 	cs, err := a.store.Clusters(ctx, false)
 	if err != nil {
 		return err
@@ -255,8 +302,6 @@ func (a *App) SyncClusters(ctx context.Context) error {
 		want[c.ID] = collector.ClusterConfig{ID: c.ID, Name: c.Name, ES: a.store.ApplyTLSDefaults(ctx, c.ES), BoundUUID: c.BoundUUID, Suspended: c.Suspended,
 			Schedule: sched, SettingsWhitelist: whitelist}
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	for id := range a.running {
 		if _, ok := want[id]; !ok {
 			a.collector.Remove(id)
@@ -265,7 +310,12 @@ func (a *App) SyncClusters(ctx context.Context) error {
 	}
 	var errs []error
 	for id, cfg := range want {
-		b, _ := json.Marshal(cfg)
+		// The binding and the suspension are left out: the worker sets them
+		// itself (Bound, Suspended) and Resume applies to the running worker.
+		// Restarting it would lose its schedule and capture everything again.
+		hc := cfg
+		hc.BoundUUID, hc.Suspended = "", false
+		b, _ := json.Marshal(hc)
 		h := fmt.Sprintf("%x", sha256.Sum256(b))
 		if a.running[id] == h {
 			continue
@@ -294,12 +344,11 @@ func (a *App) Bound(clusterID, uuid string) {
 func (a *App) Suspended(clusterID, bound, seen string) {
 	ctx := context.Background()
 	reason := fmt.Sprintf("cluster_uuid changed from %s to %s", bound, seen)
+	// The worker stays: suspended by itself, it waits for Resume, and a later
+	// SyncClusters can still reconfigure or remove it.
 	if err := a.store.SetSuspended(ctx, clusterID, true, reason); err != nil {
 		a.log.Error("suspend cluster", "cluster", clusterID, "err", err)
 	}
-	a.mu.Lock()
-	delete(a.running, clusterID) // configuration changed (suspended): recreate on next sync
-	a.mu.Unlock()
 	if err := a.ingester.Note(ctx, clusterID, a.clock.Now().UnixMilli(), store.EventClusterUUIDChanged, 1,
 		map[string]string{"bound": bound, "seen": seen}); err != nil {
 		a.log.Error("record identity change", "cluster", clusterID, "err", err)
@@ -307,29 +356,35 @@ func (a *App) Suspended(clusterID, bound, seen string) {
 }
 
 func (a *App) retentionLoop(ctx context.Context) {
+	// Errors of a pass cut short by the shutdown are not reported.
+	fail := func(msg string, err error) {
+		if ctx.Err() == nil {
+			a.log.Error(msg, "err", err)
+		}
+	}
 	run := func() {
 		pol, err := a.store.RetentionPolicy(ctx)
 		if err != nil {
-			a.log.Error("retention policy", "err", err)
+			fail("retention policy", err)
 			return
 		}
 		rep, err := a.store.ApplyRetention(ctx, pol)
 		if err != nil {
-			a.log.Error("retention", "err", err)
+			fail("retention", err)
 		} else if n := len(rep.DeletedByAge) + len(rep.DeletedBySize); n > 0 {
 			a.log.Info("retention", "deleted_by_age", len(rep.DeletedByAge), "deleted_by_size", len(rep.DeletedBySize), "bytes", rep.TotalBytes)
 		}
 		now := a.clock.Now()
 		if err := a.store.DeleteExpiredSessions(ctx, now.UnixMilli()); err != nil {
-			a.log.Error("expired sessions", "err", err)
+			fail("expired sessions", err)
 		}
 		if n, err := a.store.PruneAudit(ctx, now.Add(-AuditRetention).UnixMilli()); err != nil {
-			a.log.Error("audit prune", "err", err)
+			fail("audit prune", err)
 		} else if n > 0 {
 			a.log.Info("audit pruned", "entries", n)
 		}
 		if n, err := a.spool.Prune(a.clock.Now(), SpoolRetention); err != nil {
-			a.log.Error("spool prune", "err", err)
+			fail("spool prune", err)
 		} else if n > 0 {
 			a.log.Debug("spool pruned", "files", n)
 		}
@@ -392,8 +447,11 @@ func newPipeline(ing *store.Ingester, sp *record.Spool, log *slog.Logger) *pipel
 		stats: map[string]*IngestStat{}, failed: map[string]*failedRecord{}, replayed: map[string]string{}}
 }
 
-// Record implements collector.Sink.
-func (p *pipeline) Record(r *record.Record) error {
+// Record spools r and queues it for the ingestion.
+func (p *pipeline) Record(r *record.Record) error { return p.send(r, nil) }
+
+// send spools r and queues it, unless stop is closed first (nil: never).
+func (p *pipeline) send(r *record.Record, stop <-chan struct{}) error {
 	e, err := p.spool.Write(r)
 	if err != nil {
 		return err
@@ -405,9 +463,21 @@ func (p *pipeline) Record(r *record.Record) error {
 		p.pending.Add(-1)
 	case <-p.stopped:
 		p.pending.Add(-1)
+	case <-stop:
+		// Worker stopped (cluster removed or reconfigured): the record stays
+		// in the spool, replayed at the next start unless a newer record of
+		// its cluster is ingested first.
+		p.pending.Add(-1)
 	}
 	return nil
 }
+
+// collectorSink hands the collector's records to the pipeline.
+type collectorSink struct{ p *pipeline }
+
+// Record implements collector.Sink: a worker being stopped stops waiting for
+// room in the queue.
+func (s collectorSink) Record(r *record.Record, stop <-chan struct{}) error { return s.p.send(r, stop) }
 
 func (p *pipeline) run(ctx context.Context) {
 	p.started.Store(true)

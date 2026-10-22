@@ -4,7 +4,7 @@
 
 ES.Topo garde l'historique de la **topologie** de vos clusters Elasticsearch (7.17 à 9.x) et permet de l'explorer dans le temps. Où étaient les shards à 3 h 12 ? Quels nœuds sont partis, et avec quelles copies ? Qu'est-ce qui a bougé entre hier et maintenant, allers-retours compris ? Un seul binaire, sans dépendance, collecte en lecture seule, range l'historique dans des fichiers SQLite et sert une interface web entièrement embarquée : il fonctionne aussi sur un réseau sans accès à Internet.
 
-> **Version 0.8.0-beta.** C'est la première version publique. Le produit a été testé contre de vrais clusters Elasticsearch 7.17, 8.19 et 9.5 de test et sur des données simulées, pas encore en production à grande échelle. Attendez-vous à des défauts, lisez les [limites connues](CHANGELOG_fr.md#limites-connues) et ne l'exposez pas sur un réseau sans avoir lu [SECURITY_fr.md](SECURITY_fr.md). Le format des données et l'API peuvent encore changer avant la version 1.0.
+> **Version 0.8.1-beta.** Le produit a été testé contre de vrais clusters Elasticsearch 7.17, 8.19 et 9.5 de test et sur des données simulées, pas encore en production à grande échelle. Attendez-vous à des défauts, lisez les [limites connues](CHANGELOG_fr.md#limites-connues) et ne l'exposez pas sur un réseau sans avoir lu [SECURITY_fr.md](SECURITY_fr.md). Le format des données et l'API peuvent encore changer avant la version 1.0.
 
 ![Démonstration d'ES.Topo : choix d'une date sur le bandeau temporel, vue physique du cluster, zoom sur une machine puis sur un nœud, vue logique par famille d'indices, différences entre deux dates et pertes de copies](docs/demoestopo.gif)
 

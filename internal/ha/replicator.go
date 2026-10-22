@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -35,7 +36,7 @@ func (m *Manager) SyncOnce(ctx context.Context) error {
 		m.mu.Unlock()
 		return nil
 	}
-	base, etag, rebuildAll := m.st.StandbyOf, m.metaETag, m.rebuild
+	base, etag, rebuildAll, gen := m.st.StandbyOf, m.metaETag, m.rebuild, m.rebuildGen
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	m.syncCancel = cancel
@@ -48,20 +49,27 @@ func (m *Manager) SyncOnce(ctx context.Context) error {
 	m.syncCancel = nil
 	m.repl.Rebuilding = false
 	if err != nil {
+		// A primary that does not answer says nothing of the block: it is
+		// lifted by a primary that passes checkPrimary, not by another error.
 		var blocked *blockedError
-		was := m.repl.Blocked
-		m.repl.Blocked = ""
 		if errors.As(err, &blocked) {
-			m.repl.Blocked = blocked.reason
-			if was != blocked.reason {
+			if m.repl.Blocked != blocked.reason {
 				m.o.Log.Error("replication stopped until an administrator rebuilds this standby", "primary", base, "reason", blocked.reason)
 			}
+			m.repl.Blocked = blocked.reason
 		}
 		m.repl.LastError, m.repl.LastErrorMs = err.Error(), now
 		return err
 	}
 	m.repl.LastError, m.repl.Blocked, m.repl.LastSyncMs = "", "", now
-	if rebuildAll {
+	// Done, unless another rebuild was asked meanwhile (under m.mu: Rebuild
+	// counts its request before writing it). A restart no longer copies
+	// everything again; should the write fail, the next start only copies
+	// once more what it already holds.
+	if rebuildAll && m.rebuildGen == gen {
+		if werr := m.o.Store.SetHAState(ctx, map[string]string{"rebuild_pending": ""}); werr != nil {
+			m.o.Log.Error("save HA state", "err", werr)
+		}
 		m.rebuild = false
 	}
 	return nil
@@ -102,6 +110,9 @@ func (m *Manager) checkPrimary(ctx context.Context, st remoteStatus, remote []re
 		m.mu.Unlock()
 		m.o.Log.Info("following primary", "instance_id", st.InstanceID)
 	}
+	m.mu.Lock()
+	m.repl.Blocked = ""
+	m.mu.Unlock()
 	return nil
 }
 
@@ -159,9 +170,11 @@ func (m *Manager) sync(ctx context.Context, c *client, etag string, rebuildAll b
 		if err != nil {
 			return err
 		}
-		// No history here, or behind what the spool still holds: copy the
+		// No history here, or behind what the spool still holds (or behind
+		// a history the spool no longer holds anything of): copy the
 		// partitions, then catch up with the records.
-		if len(rc.Partitions) > 0 && (rebuildAll || cursor == 0 || (rc.OldestMs > 0 && cursor < rc.OldestMs)) {
+		if len(rc.Partitions) > 0 && (rebuildAll || cursor == 0 || (rc.OldestMs > 0 && cursor < rc.OldestMs) ||
+			(rc.OldestMs == 0 && cursor < rc.LastMs)) {
 			if err := m.rebuildCluster(ctx, c, rc); err != nil {
 				return fmt.Errorf("rebuild %s: %w", rc.Cluster, err)
 			}
@@ -203,9 +216,9 @@ func (m *Manager) sync(ctx context.Context, c *client, etag string, rebuildAll b
 		}
 		m.mu.Lock()
 		cr := m.repl1(rc.Cluster)
-		cr.PrimaryMs = rc.NewestMs
-		if rc.NewestMs > cursor {
-			lag = max(lag, rc.NewestMs-cursor)
+		cr.PrimaryMs = max(rc.NewestMs, rc.LastMs)
+		if cr.PrimaryMs > cursor {
+			lag = max(lag, cr.PrimaryMs-cursor)
 		}
 		m.mu.Unlock()
 	}
@@ -226,6 +239,11 @@ func (m *Manager) sync(ctx context.Context, c *client, etag string, rebuildAll b
 			return fmt.Errorf("purge %s: %w", id, err)
 		}
 		if _, err := m.o.Store.Purge(ctx, id); err != nil {
+			return err
+		}
+		// Its spooled records too: replayed at the next start, they would
+		// bring the cluster back until the next cycle.
+		if err := os.RemoveAll(filepath.Join(m.o.Spool.Dir(), id)); err != nil {
 			return err
 		}
 		m.o.Hooks.Forget(id)
@@ -325,9 +343,13 @@ func (m *Manager) rebuildCluster(ctx context.Context, c *client, rc remoteCluste
 	if err != nil {
 		return err
 	}
+	// Once the first partition is replaced, a stop (promotion, shutdown) is
+	// not a reason to leave the history half old, half new: the files are
+	// local, installing them is quick.
+	ictx := context.WithoutCancel(ctx)
 	weeks := map[string]bool{}
 	for i, p := range parts {
-		if err := m.o.Store.InstallPartition(ctx, rc.Cluster, p.Week, p.FromMs, files[i], p.Sealed); err != nil {
+		if err := m.o.Store.InstallPartition(ictx, rc.Cluster, p.Week, p.FromMs, files[i], p.Sealed); err != nil {
 			m.o.Hooks.Forget(rc.Cluster) // some partitions were replaced
 			return err
 		}
@@ -336,7 +358,7 @@ func (m *Manager) rebuildCluster(ctx context.Context, c *client, rc remoteCluste
 	// Weeks the primary no longer has (retention).
 	for _, p := range local {
 		if !weeks[p.Week] {
-			if err := m.o.Store.DeletePartition(ctx, p); err != nil {
+			if err := m.o.Store.DeletePartition(ictx, p); err != nil {
 				return err
 			}
 		}

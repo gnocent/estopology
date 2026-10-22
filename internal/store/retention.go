@@ -60,13 +60,18 @@ type RetentionReport struct {
 	DeletedBySize []PartitionInfo
 	TotalBytes    int64 // after the pass: partitions + meta.db + spool + tmp (the whole data directory)
 	OtherBytes    int64 // meta.db, spool and copies in transit (tmp), counted but never deleted here
-	OverLimit     bool  // still above MaxBytes (only current partitions left)
+	OverLimit     bool  // still above MaxBytes (only the latest partition of each cluster left)
 }
 
 // ApplyRetention deletes the partitions whose whole week is older than the
 // retention, then, if the data directory exceeds MaxBytes, the oldest
-// partitions of any cluster until it fits (SPEC §6.6, B13, B14). The
-// partition of the current week of each cluster is never deleted.
+// partitions of any cluster until it fits (SPEC §6.6, B13, B14). The size
+// limit never deletes the latest partition of a cluster: until the first
+// record of a week, the partition of the week before holds the current
+// state, which the keyframe of that record carries on. The age limit does:
+// a cluster with nothing recorded for the whole retention has no state left
+// to carry on (removed or suspended), and its next record starts a new
+// history.
 func (s *Store) ApplyRetention(ctx context.Context, pol Retention) (RetentionReport, error) {
 	var rep RetentionReport
 	now := s.clock.Now().UnixMilli()
@@ -74,6 +79,10 @@ func (s *Store) ApplyRetention(ctx context.Context, pol Retention) (RetentionRep
 	parts, err := s.Partitions(ctx, "")
 	if err != nil {
 		return rep, err
+	}
+	latest := map[string]string{} // week of the latest partition, by cluster (parts: oldest first)
+	for _, p := range parts {
+		latest[p.Cluster] = p.Week
 	}
 	limit := now - int64(pol.MaxAgeDays)*24*int64(time.Hour/time.Millisecond)
 	var kept []PartitionInfo
@@ -108,7 +117,7 @@ func (s *Store) ApplyRetention(ctx context.Context, pol Retention) (RetentionRep
 			if rep.TotalBytes <= pol.MaxBytes {
 				break
 			}
-			if p.Week == current {
+			if p.Week == current || p.Week == latest[p.Cluster] {
 				continue
 			}
 			if err := s.DeletePartition(ctx, p); err != nil {

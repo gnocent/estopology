@@ -64,8 +64,10 @@ type nodeFilter struct {
 }
 
 type watermark struct {
-	pct     float64 // used percentage limit, NaN if expressed in bytes
-	minFree int64   // free bytes limit, 0 if expressed in percent
+	pct      float64 // used percentage limit, NaN if expressed in bytes
+	minFree  int64   // free bytes limit, 0 if expressed in percent
+	headroom int64   // max_headroom of a percentage: free bytes above which a node is below it; 0 = none
+	disabled bool    // cluster.routing.allocation.disk.threshold_enabled=false
 }
 
 // Constraints evaluates every index of the state.
@@ -112,6 +114,19 @@ func newCtx(st *model.State) *ctx {
 		hw = "90%"
 	}
 	c.highWM = parseWatermark(hw)
+	c.highWM.disabled = get("cluster.routing.allocation.disk.threshold_enabled") == "false"
+	// From 8.5, a percentage watermark is capped by a max headroom of free
+	// space: 150 GB by default when the watermark is left at its default
+	// (include_defaults then reports it, "-1" when the watermark is set).
+	if !math.IsNaN(c.highWM.pct) {
+		mh := get("cluster.routing.allocation.disk.watermark.high.max_headroom")
+		if _, set := s["cluster.routing.allocation.disk.watermark.high"]; mh == "" && !set && minVersionAtLeast(st, 8, 5) {
+			mh = "150gb"
+		}
+		if w := parseWatermark(mh); mh != "" && w.minFree > 0 {
+			c.highWM.headroom = w.minFree
+		}
+	}
 	for i := range st.Nodes {
 		n := &st.Nodes[i]
 		if !n.Present || !n.IsData() {
@@ -189,13 +204,41 @@ func parseWatermark(s string) watermark {
 // aboveHigh reports whether a node is above the high watermark.
 func (c *ctx) aboveHigh(n *model.Node) bool {
 	m := n.Metrics
-	if m == nil || m.DiskTotal <= 0 || m.DiskUsed < 0 {
+	if c.highWM.disabled || m == nil || m.DiskTotal <= 0 || m.DiskUsed < 0 {
 		return false
 	}
 	if c.highWM.minFree > 0 {
 		return m.DiskTotal-m.DiskUsed < c.highWM.minFree
 	}
+	if c.highWM.headroom > 0 && m.DiskTotal-m.DiskUsed >= c.highWM.headroom {
+		return false
+	}
 	return m.DiskPercent() > c.highWM.pct
+}
+
+// minVersionAtLeast reports whether every present node with a known version
+// runs at least major.minor (a setting exists in a mixed cluster once all
+// its nodes know it).
+func minVersionAtLeast(st *model.State, major, minor int) bool {
+	seen := false
+	for i := range st.Nodes {
+		n := &st.Nodes[i]
+		if !n.Present || n.Version == "" {
+			continue
+		}
+		seen = true
+		parts := strings.SplitN(n.Version, ".", 3)
+		ma, err1 := strconv.Atoi(parts[0])
+		mi := 0
+		var err2 error
+		if len(parts) > 1 {
+			mi, err2 = strconv.Atoi(parts[1])
+		}
+		if err1 != nil || err2 != nil || ma < major || ma == major && mi < minor {
+			return false
+		}
+	}
+	return seen
 }
 
 func nodeAttr(n *model.Node, attr string) string {
@@ -232,8 +275,23 @@ func passFilters(n *model.Node, fs []nodeFilter) bool {
 		v := nodeAttr(n, f.attr)
 		switch f.op {
 		case "require":
-			if !match(v, f.values) {
+			// Every value must match (Elasticsearch DiscoveryNodeFilters,
+			// AND), except for IP attributes where one is enough.
+			if f.attr == "_ip" || f.attr == "_host_ip" || f.attr == "_publish_ip" {
+				if !match(v, f.values) {
+					return false
+				}
+				continue
+			}
+			// A node without the attribute matches no value, not even "*"
+			// (checked on Elasticsearch 9.5).
+			if _, ok := n.Attrs[f.attr]; !ok && !strings.HasPrefix(f.attr, "_") {
 				return false
+			}
+			for _, p := range f.values {
+				if !match(v, []string{p}) {
+					return false
+				}
 			}
 		case "exclude":
 			if v != "" && match(v, f.values) {

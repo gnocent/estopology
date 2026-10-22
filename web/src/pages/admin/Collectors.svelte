@@ -38,6 +38,12 @@
     }
   }
 
+  // Whole hours and minutes, e.g. "3 h 20 min".
+  function duration(ms: number): string {
+    const h = Math.floor(ms / 3_600_000), m = Math.floor(ms / 60_000) % 60;
+    return m ? `${h} h ${m} min` : `${h} h`;
+  }
+
   function summary(c?: CaptureStatus): string {
     if (!c) return '—';
     return `${dateTime(c.start_ms, true)} · ${c.status} · ${(c.duration_ms / 1000).toFixed(1)} s`;
@@ -45,6 +51,9 @@
 </script>
 
 {#if error}<div class="banner warn">{t('common.error', { msg: error })}</div>{/if}
+{#each rows.filter((r) => r.history_ahead_ms) as r (r.id)}
+  <div class="banner warn" use:tip={utc(r.history_until_ms)}>{t('admin.collector.ahead', { cluster: r.name, until: dateTime(r.history_until_ms), ahead: duration(r.history_ahead_ms ?? 0) })}</div>
+{/each}
 <div class="card row parallel">
   <label class="row"><span>{t('admin.collector.parallelism')}</span><input type="text" inputmode="numeric" size="3" bind:value={parallelism} /></label>
   <button onclick={saveParallelism}>{t('common.save')}</button>

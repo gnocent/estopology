@@ -126,7 +126,14 @@
   const headH = $derived(view.grouped ? bandsH + Math.min(170, 14 + 6.2 * Math.max(...view.labels.map((l) => l.length), 4)) : bandsH || 8);
   // Scale of the colours: the named families only. The "others" row adds up
   // many families and would flatten every other row.
-  const maxCount = $derived(Math.max(1, ...view.counts.filter((_, r) => m.families[r]).flat()));
+  // (A loop: spreading every cell into Math.max overflows the stack on large grids.)
+  const maxCount = $derived.by(() => {
+    let max = 1;
+    view.counts.forEach((row, r) => {
+      if (m.families[r]) for (const v of row) if (v > max) max = v;
+    });
+    return max;
+  });
   let canvas: HTMLCanvasElement;
   let tip = $state<{ x: number; y: number; text: string } | null>(null);
 

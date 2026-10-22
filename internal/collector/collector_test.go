@@ -23,7 +23,7 @@ type memSink struct {
 	recs []*record.Record
 }
 
-func (s *memSink) Record(r *record.Record) error {
+func (s *memSink) Record(r *record.Record, _ <-chan struct{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.recs = append(s.recs, r)

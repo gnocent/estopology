@@ -37,11 +37,13 @@ type worker struct {
 	mu            sync.Mutex
 	cfg           ClusterConfig
 	manual, force bool
-	reset         bool // forget the last full capture (Resume)
+	reset         bool // forget the last full capture (Resume, Reset)
 	status        Status
 
-	// Owned by the run goroutine.
+	// Owned by the run goroutine. Schedule times are monotonic ms (mono).
+	started     int64 // start of the worker
 	nextProbe   int64
+	attempted   bool     // a full capture was attempted
 	lastAttempt int64    // last full capture attempt (for min/max interval)
 	lastFull    snapshot // state seen by the last successful full capture
 	lastProbe   snapshot
@@ -55,18 +57,33 @@ func (w *worker) poke() {
 	}
 }
 
+// now is the wall time of the records, in ms.
 func (w *worker) now() int64 { return w.c.clock.Now().UnixMilli() }
+
+// mono is the schedule time, in ms: it does not step back with the wall
+// clock, which would hold the probes back as long.
+func (w *worker) mono() int64 { return w.c.mono().Milliseconds() }
+
+// maxFrom is when the maximum interval runs from: the last full capture
+// attempt, or the start of the worker while no probe could trigger one.
+func (w *worker) maxFrom() int64 {
+	if w.attempted {
+		return w.lastAttempt
+	}
+	return w.started
+}
 
 func (w *worker) run() {
 	defer close(w.done)
-	w.nextProbe = w.now() // probe immediately at start
+	w.started = w.mono()
+	w.nextProbe = w.started // probe immediately at start
 	for {
 		w.mu.Lock()
 		suspended := w.cfg.Suspended
 		sched := w.cfg.Schedule
 		w.mu.Unlock()
 
-		now := w.now()
+		now := w.mono()
 		if !suspended {
 			w.step(now, sched)
 		}
@@ -74,18 +91,16 @@ func (w *worker) run() {
 		// Next wake-up: next probe, a deferred capture becoming possible, or
 		// the max interval.
 		next := w.nextProbe
-		if w.pending != "" {
+		if w.pending != "" && w.attempted {
 			next = min(next, w.lastAttempt+sched.MinInterval.Milliseconds())
 		}
-		if w.lastAttempt > 0 {
-			next = min(next, w.lastAttempt+sched.MaxInterval.Milliseconds())
-		}
+		next = min(next, w.maxFrom()+sched.MaxInterval.Milliseconds())
 		w.mu.Lock()
-		w.status.NextProbeMs = w.nextProbe
+		w.status.NextProbeMs = w.now() + w.nextProbe - w.mono()
 		w.status.PendingTrigger = w.pending
 		w.mu.Unlock()
 
-		wait := time.Duration(max(next-w.now(), 0)) * time.Millisecond
+		wait := time.Duration(max(next-w.mono(), 0)) * time.Millisecond
 		if suspended {
 			wait = sched.ProbeEvery
 		}
@@ -136,13 +151,13 @@ func (w *worker) step(now int64, sched Schedule) {
 	if manual && w.pending == "" {
 		w.pending = record.TriggerManual
 	}
-	if w.lastAttempt > 0 && now-w.lastAttempt >= sched.MaxInterval.Milliseconds() && w.pending == "" {
+	if now-w.maxFrom() >= sched.MaxInterval.Milliseconds() && w.pending == "" {
 		w.pending = record.TriggerMaxInterval
 	}
 	if w.pending == "" {
 		return
 	}
-	if !force && w.lastAttempt > 0 && now-w.lastAttempt < sched.MinInterval.Milliseconds() {
+	if !force && w.attempted && now-w.lastAttempt < sched.MinInterval.Milliseconds() {
 		return // deferred, not lost (SPEC §5.3)
 	}
 	trig := w.pending
@@ -183,12 +198,23 @@ func abs(x int) int {
 }
 
 func snapshotOf(r *record.Record) snapshot {
-	if r.Status == record.Failed || r.Health == nil || r.NodesStats == nil {
+	if r.Status == record.Failed || r.Health == nil {
 		return snapshot{}
 	}
-	names := make([]string, 0, len(r.NodesStats))
-	for _, n := range r.NodesStats {
-		names = append(names, n.Name+":"+n.ID)
+	var names []string
+	switch {
+	case r.NodesStats != nil:
+		for _, n := range r.NodesStats {
+			names = append(names, n.Name+":"+n.ID)
+		}
+	case r.Nodes != nil:
+		// Full capture whose _nodes/stats call failed: _nodes lists the
+		// same nodes.
+		for _, n := range r.Nodes {
+			names = append(names, n.Name+":"+n.ID)
+		}
+	default:
+		return snapshot{}
 	}
 	sort.Strings(names)
 	s := snapshot{
@@ -253,8 +279,13 @@ func (w *worker) probeCalls(r *record.Record, withDefaults bool) bool {
 	}
 	r.Health = &h
 
+	// A failed side call leaves its section out (nil: unknown, not empty).
+	// It makes a probe partial; a full capture stays ok unless a structural
+	// call fails too (see structure).
 	partial := func(what string, err error) {
-		r.Status = record.Partial
+		if r.Kind == record.Light {
+			r.Status = record.Partial
+		}
 		if r.Error != "" {
 			r.Error += "; "
 		}
@@ -340,7 +371,7 @@ func (w *worker) full(trigger string) {
 	}
 	defer func() { <-w.c.fullSem }()
 
-	w.lastAttempt = w.now()
+	w.lastAttempt, w.attempted = w.mono(), true
 	r := w.newRecord(record.Full, trigger)
 	if !w.probeCalls(r, true) {
 		return
@@ -349,8 +380,10 @@ func (w *worker) full(trigger string) {
 		w.structure(r)
 	}
 	w.finish(r, &w.status.LastFull)
-	if r.HasStructure() {
-		w.lastFull = snapshotOf(r)
+	// An invalid snapshot would make the next probe trigger a "first"
+	// capture: keep the previous reference instead.
+	if s := snapshotOf(r); r.HasStructure() && s.valid {
+		w.lastFull = s
 	}
 }
 
@@ -410,7 +443,7 @@ func (w *worker) structure(r *record.Record) {
 	} else {
 		r.Shards = shards
 	}
-	if r.Status == record.Partial {
+	if r.Status == record.Partial { // only the structural calls make a full capture partial
 		// Nothing structural may be closed from an incomplete picture.
 		r.Nodes, r.Indices, r.Shards = nil, nil, nil
 	}
@@ -420,7 +453,7 @@ func (w *worker) structure(r *record.Record) {
 func (w *worker) finish(r *record.Record, slot **CaptureStatus) {
 	r.EndMs = w.now()
 	r.Sort()
-	err := w.c.sink.Record(r)
+	err := w.c.sink.Record(r, w.stop)
 	cs := &CaptureStatus{StartMs: r.StartMs, DurationMs: r.EndMs - r.StartMs, Status: r.Status, Trigger: r.Trigger,
 		Error: r.Error, Calls: r.Calls}
 	w.mu.Lock()

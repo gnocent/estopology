@@ -97,10 +97,10 @@ Toutes les 30 secondes, la standby :
 1. vérifie que le primaire est bien l'instance qu'elle suit (voir [Réplication bloquée](#réplication-bloquée)) ;
 2. recopie la configuration si elle a changé : clusters, réglages (rétention, liste blanche, authentification et LDAP, CA par défaut…), règles de familles, comptes, acquittements, journal d'audit ;
 3. pour chaque cluster, récupère les relevés qu'elle n'a pas encore et les intègre exactement comme le fait le primaire ;
-4. recopie les fichiers d'historique complets d'un cluster quand elle n'a rien pour lui, ou quand elle est en retard de plus de 72 heures (la durée pendant laquelle le primaire garde les relevés bruts) ;
-5. supprime l'historique d'un cluster que le primaire a purgé.
+4. recopie les fichiers d'historique complets d'un cluster quand elle n'a rien pour lui, ou quand elle est en retard de plus de 72 heures (la durée pendant laquelle le primaire garde les relevés bruts), ou en retard sur un primaire qui n'a plus les relevés bruts de ce cluster (par exemple un cluster désactivé pendant que la standby était arrêtée) ;
+5. supprime l'historique d'un cluster que le primaire a purgé, avec ses relevés bruts.
 
-Ne sont **pas** répliqués, parce qu'ils décrivent l'instance elle-même : les sessions (on se connecte séparément à chaque instance), les alertes, le rôle et l'état de haute disponibilité. Les fichiers de secrets et les variables d'environnement ne le sont pas non plus.
+Ne sont **pas** répliqués, parce qu'ils décrivent l'instance elle-même : les sessions (on se connecte séparément à chaque instance ; la standby ferme les siennes quand un mot de passe, un rôle ou le mode d'authentification change sur le primaire, ou quand un compte y est désactivé ou supprimé), les alertes, le rôle et l'état de haute disponibilité. Les fichiers de secrets et les variables d'environnement ne le sont pas non plus.
 
 Une standby (comme un ancien primaire en quarantaine) refuse toute modification : clusters, comptes, réglages, test de connexion, test LDAP, changement de mot de passe. Le message est `this instance is standby: changes are made on the primary`. Seules les actions de haute disponibilité, la connexion et la déconnexion restent possibles.
 
@@ -120,7 +120,7 @@ Sur une standby, section « Réplication » :
 | Élément | Signification |
 |---|---|
 | « Dernière synchronisation » | Dernier cycle terminé sans erreur. |
-| « Retard » | Écart entre le relevé le plus récent du primaire et le plus récent intégré ici (le pire des clusters). |
+| « Retard » | Écart entre le relevé le plus récent du primaire (brut ou déjà dans son historique) et le plus récent intégré ici (le pire des clusters). |
 | « Copie des partitions en cours… » | Une reconstruction est en cours. |
 | « Dernière erreur » | Erreur du dernier cycle, avec sa date. |
 | « Réplication bloquée : … » | Voir [Réplication bloquée](#réplication-bloquée). |
@@ -156,11 +156,11 @@ Au démarrage, puis toutes les 30 secondes, un primaire interroge l'instance qu'
 - affiche le bandeau « Collecte suspendue : une standby a été promue depuis. Rétrograder cette instance (Administration › Haute disponibilité). » ;
 - refuse toute modification.
 
-Pour en refaire une standby : sur cet ancien primaire, **Administration › Haute disponibilité**, vérifiez l'« URL du nouveau primaire » (par défaut, l'instance surveillée), cliquez sur « Rétrograder en standby » et confirmez. L'instance recopie alors **tout** l'historique du nouveau primaire. Les relevés qu'elle était seule à posséder sont perdus.
+Pour en refaire une standby : sur cet ancien primaire, **Administration › Haute disponibilité**, vérifiez l'« URL du nouveau primaire » (par défaut, l'instance surveillée), cliquez sur « Rétrograder en standby » et confirmez. L'instance recopie alors **tout** l'historique du nouveau primaire. Les relevés qu'elle était seule à posséder sont perdus. Si elle redémarre avant la fin de la copie, la copie est faite après le redémarrage.
 
 ### Reconstruire
 
-« Reconstruire », sur une standby, recopie tout l'historique depuis le primaire. Utilisez-le quand la standby vous semble incohérente, ou pour sortir d'un blocage (section suivante).
+« Reconstruire », sur une standby, recopie tout l'historique depuis le primaire. Utilisez-le quand la standby vous semble incohérente, ou pour sortir d'un blocage (section suivante). La demande survit à un redémarrage de la standby jusqu'à ce que la copie ait réussi.
 
 La standby télécharge d'abord tous les fichiers d'un cluster, les vérifie, puis remplace les siens : pendant l'opération, il faut jusqu'à **deux fois** l'espace disque de ce cluster. Côté primaire, chaque fichier est d'abord copié dans le sous-dossier `tmp` du dossier de données avant d'être envoyé : prévoyez la place d'un fichier hebdomadaire supplémentaire. La page affiche « Copie des partitions en cours… ».
 
@@ -186,6 +186,8 @@ Vous le voyez :
 - dans **Administration › Haute disponibilité** de la standby : encadré « Réplication bloquée : » suivi de la raison, et « Rien n'est importé ni supprimé tant que le blocage dure. … » ;
 - dans le journal de la standby : `replication stopped until an administrator rebuilds this standby` ;
 - par la métrique `estopo_replication_blocked`, qui vaut 1.
+
+Le blocage demeure tant que le primaire ne répond pas : seul un primaire qui passe la vérification le lève.
 
 Pour en sortir, décidez quelle instance détient le bon historique :
 

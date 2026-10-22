@@ -20,7 +20,10 @@
   import Login from './pages/Login.svelte';
 
   session.load();
-  setShowSystem(() => router.query.get('system') === '1');
+  // A derived boolean: API calls made in an effect depend on this flag only,
+  // not on the whole query string.
+  const system = $derived(router.query.get('system') === '1');
+  setShowSystem(() => system);
 
   $effect(() => {
     document.documentElement.dataset.theme = prefs.dark ? 'dark' : 'light';

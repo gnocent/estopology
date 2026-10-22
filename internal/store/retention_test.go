@@ -113,6 +113,37 @@ func TestRetentionBySize(t *testing.T) {
 	}
 }
 
+// On Monday before the first record of the week, the partition of the last
+// week is still the current state of the cluster: the size limit does not
+// delete it, and the next record is a keyframe that carries the intervals on.
+func TestRetentionBySizeKeepsTheLastPartitionOfEachCluster(t *testing.T) {
+	ctx := context.Background()
+	st, clk, in, c, _ := retentionEnv(t, 7) // W36, Monday to Sunday at 06:00
+	monday := time.Date(2026, 9, 7, 0, 30, 0, 0, time.UTC)
+	clk.Set(monday)
+	rep, err := st.ApplyRetention(ctx, Retention{MaxAgeDays: 365, MaxBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left, _ := st.Partitions(ctx, "small"); len(left) != 1 || left[0].Week != "2026-W36" || len(rep.DeletedBySize) != 0 || !rep.OverLimit {
+		t.Fatalf("left %+v, report %+v", left, rep)
+	}
+	res, err := in.Ingest(ctx, c.CaptureAt(monday.Add(time.Hour).UnixMilli(), "small", record.Full, "t"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Keyframe {
+		t.Errorf("first record of the week: %+v", res)
+	}
+	// Now W37 is the last partition: W36 can go.
+	if _, err := st.ApplyRetention(ctx, Retention{MaxAgeDays: 365, MaxBytes: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if left, _ := st.Partitions(ctx, "small"); len(left) != 1 || left[0].Week != "2026-W37" {
+		t.Errorf("left %+v", left)
+	}
+}
+
 func TestPurgeAndSettings(t *testing.T) {
 	ctx := context.Background()
 	st, _, _, _, _ := retentionEnv(t, 8)

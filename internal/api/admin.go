@@ -222,7 +222,11 @@ func (s *Server) handleAdminResume(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAdminPurge(w http.ResponseWriter, r *http.Request) {
 	ctx, id := r.Context(), r.PathValue("id")
-	n, err := s.store.Purge(ctx, id)
+	purge := s.store.Purge
+	if s.purge != nil {
+		purge = s.purge
+	}
+	n, err := purge(ctx, id)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -236,7 +240,24 @@ func (s *Server) handleAdminCollectors(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, []any{})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.collector.Status())
+	sts := s.collector.Status()
+	out := make([]collectorStatus, len(sts))
+	for i, st := range sts {
+		out[i].Status = st
+		if last, d, err := s.store.HistoryAhead(r.Context(), st.ID); err == nil {
+			out[i].HistoryUntilMs, out[i].HistoryAheadMs = last, d.Milliseconds()
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// collectorStatus adds to the state of a collector the date of the last
+// ingested record when it is ahead of the clock (SPEC §6.7): the newer
+// records are refused until the clock catches up.
+type collectorStatus struct {
+	collector.Status
+	HistoryUntilMs int64 `json:"history_until_ms,omitempty"`
+	HistoryAheadMs int64 `json:"history_ahead_ms,omitempty"`
 }
 
 // validSchedule checks a cluster schedule (SPEC §5.3, §9 "Planification").

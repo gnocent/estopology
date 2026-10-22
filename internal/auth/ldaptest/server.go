@@ -86,7 +86,7 @@ func Start(tb testing.TB) *Server {
 
 func person(uid, pw string) Entry {
 	return Entry{DN: "uid=" + uid + "," + PeopleBase, Password: pw,
-		Attrs: map[string][]string{"objectclass": {"inetOrgPerson"}, "uid": {uid}, "cn": {uid}}}
+		Attrs: map[string][]string{"objectclass": {"inetOrgPerson"}, "uid": {uid}, "cn": {uid}, "mail": {uid + "@example.org"}}}
 }
 
 func directory() []Entry {
@@ -217,7 +217,23 @@ func (s *Server) search(w io.Writer, id int64, op *ber.Packet) {
 		}
 		entry := ber.Encode(ber.ClassApplication, ber.TypeConstructed, tagSearchEntry, nil, "")
 		entry.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, e.DN, ""))
-		entry.AppendChild(ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, ""))
+		attrs := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "")
+		for _, a := range op.Children[7].Children {
+			name := strings.ToLower(str(a))
+			vals, ok := e.Attrs[name]
+			if !ok {
+				continue
+			}
+			pa := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "")
+			pa.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, name, ""))
+			set := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSet, nil, "")
+			for _, v := range vals {
+				set.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, v, ""))
+			}
+			pa.AppendChild(set)
+			attrs.AppendChild(pa)
+		}
+		entry.AppendChild(attrs)
 		w.Write(envelope(id, entry).Bytes())
 		n++
 	}

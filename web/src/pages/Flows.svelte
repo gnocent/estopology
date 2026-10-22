@@ -14,7 +14,7 @@
   import Info from '../components/Info.svelte';
 
   let { cluster }: { cluster: string } = $props();
-  const win = $derived(abWindow());
+  const win = abWindow();
   const level = $derived(router.query.get('level') ?? 'tier');
   const fromG = $derived(router.query.get('from_group') ?? '');
   const toG = $derived(router.query.get('to_group') ?? '');
@@ -26,7 +26,11 @@
     const ctrl = new AbortController();
     api2.flows(cluster, { a: win.a, b: win.b, level, from_group: fromG, to_group: toG }, ctrl.signal).then(
       (x) => ((f = x), (error = '')),
-      (e) => (e as Error).name !== 'AbortError' && (error = (e as Error).message),
+      (e) => {
+        if ((e as Error).name === 'AbortError') return;
+        f = null;
+        error = (e as Error).message;
+      },
     );
     return () => ctrl.abort();
   });
@@ -96,7 +100,7 @@
 </div>
 {#if error}<div class="banner warn">{t('common.error', { msg: error })}</div>{/if}
 {#if !f}
-  <p class="muted loading">{t('common.loading')}</p>
+  {#if !error}<p class="muted loading">{t('common.loading')}</p>{/if}
 {:else if !graph}
   <p class="muted">{t('flows.none')}</p>
 {:else}
