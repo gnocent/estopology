@@ -2,6 +2,10 @@
 
 # ES.Topo
 
+[![Check](https://github.com/gnocent/estopology/actions/workflows/check.yml/badge.svg)](https://github.com/gnocent/estopology/actions/workflows/check.yml)
+[![Release](https://img.shields.io/github/v/release/gnocent/estopology?include_prereleases)](https://github.com/gnocent/estopology/releases)
+[![License](https://img.shields.io/github/license/gnocent/estopology)](LICENSE)
+
 ES.Topo garde l'historique de la **topologie** de vos clusters Elasticsearch (7.17 à 9.x) et permet de l'explorer dans le temps. Où étaient les shards à 3 h 12 ? Quels nœuds sont partis, et avec quelles copies ? Qu'est-ce qui a bougé entre hier et maintenant, allers-retours compris ? Un seul binaire, sans dépendance, collecte en lecture seule, range l'historique dans des fichiers SQLite et sert une interface web entièrement embarquée : il fonctionne aussi sur un réseau sans accès à Internet.
 
 > **Version 0.8.1-beta.** Le produit a été testé contre de vrais clusters Elasticsearch 7.17, 8.19 et 9.5 de test et sur des données simulées, pas encore en production à grande échelle. Attendez-vous à des défauts, lisez les [limites connues](CHANGELOG_fr.md#limites-connues) et ne l'exposez pas sur un réseau sans avoir lu [SECURITY_fr.md](SECURITY_fr.md). Le format des données et l'API peuvent encore changer avant la version 1.0.
